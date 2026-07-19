@@ -288,7 +288,7 @@ libspdm_return_t do_certificate_provising_via_spdm(uint32_t* session_id)
 
 #if (LIBSPDM_ENABLE_CAPABILITY_SET_CERT_CAP) || (LIBSPDM_ENABLE_CAPABILITY_CSR_CAP)
     libspdm_data_parameter_t parameter;
-    bool multi_key_conn_rsp;
+    bool multi_key_conn_rsp = false;
 #endif /*(LIBSPDM_ENABLE_CAPABILITY_SET_CERT_CAP) || (LIBSPDM_ENABLE_CAPABILITY_CSR_CAP)*/
 
 #if LIBSPDM_ENABLE_CAPABILITY_SET_CERT_CAP
@@ -313,6 +313,18 @@ libspdm_return_t do_certificate_provising_via_spdm(uint32_t* session_id)
 
     libspdm_return_t status;
     spdm_context = m_spdm_context;
+
+#if (LIBSPDM_ENABLE_CAPABILITY_SET_CERT_CAP) || (LIBSPDM_ENABLE_CAPABILITY_CSR_CAP)
+    {
+        size_t multi_key_data_size;
+
+        libspdm_zero_mem(&parameter, sizeof(parameter));
+        parameter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+        multi_key_data_size = sizeof(multi_key_conn_rsp);
+        libspdm_get_data(spdm_context, LIBSPDM_DATA_MULTI_KEY_CONN_RSP, &parameter,
+                         &multi_key_conn_rsp, &multi_key_data_size);
+    }
+#endif
 
 #if LIBSPDM_ENABLE_CAPABILITY_CSR_CAP
 

@@ -19,6 +19,8 @@ option(ENABLE_SYSTEMD "Install systemd service file" OFF)
 set(DEVICE ${DEVICE} CACHE STRING "Choose the test device: sample tpm, and default is sample" FORCE)
 
 option(LIBSPDM_TPM_SUPPORT "Add TPM support in crypt_ext" OFF)
+option(LIBSPDM_ENABLE_MEASUREMENT_OPAQUE_DATA_EX
+       "Use the extended measurement opaque-data callback" OFF)
 option(USE_SYSTEM_LIBSPDM "Use system provided libspdm" OFF)
 option(BUILD_VALIDATOR_SAMPLES "Build SPDM validator and attester samples (requires SPDM-Responder-Validator submodule)" ON)
 
@@ -28,6 +30,26 @@ endif()
 
 if (NOT DEVICE)
     set(DEVICE "sample")
+endif()
+
+if (DEVICE STREQUAL "tpm")
+    set(LIBSPDM_TPM_VENDOR_ID "0x1014" CACHE STRING "TCG SVH vendor ID for the device/evidence provider")
+    set(LIBSPDM_TPM_IAK_SLOT_ID "1" CACHE STRING "SPDM slot containing the TPM IAK certificate")
+    set(LIBSPDM_TPM_IAK_KEY_PAIR_ID "0xFE" CACHE STRING "Reserved KeyPairID for the TPM IAK")
+    set(LIBSPDM_TPM_IAK_BASE_ASYM_ALGO
+        "SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_ECDSA_ECC_NIST_P256"
+        CACHE STRING "ECDSA P-256 IAK public key. Quote evidence accepts only P-256.")
+    set(LIBSPDM_TPM_IAK_BASE_HASH_ALGO
+        "SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_256"
+        CACHE STRING "SPDM algorithm identifier for the IAK Quote signature hash")
+    add_definitions(-DLIBSPDM_TPM_IAK_SLOT_ID=${LIBSPDM_TPM_IAK_SLOT_ID})
+    add_definitions(-DLIBSPDM_TPM_IAK_KEY_PAIR_ID=${LIBSPDM_TPM_IAK_KEY_PAIR_ID})
+    add_definitions(-DLIBSPDM_TPM_VENDOR_ID=${LIBSPDM_TPM_VENDOR_ID})
+    add_definitions(-DLIBSPDM_TPM_IAK_BASE_ASYM_ALGO=${LIBSPDM_TPM_IAK_BASE_ASYM_ALGO})
+    add_definitions(-DLIBSPDM_TPM_IAK_BASE_HASH_ALGO=${LIBSPDM_TPM_IAK_BASE_HASH_ALGO})
+elseif (LIBSPDM_TPM_SUPPORT)
+    message(FATAL_ERROR
+        "LIBSPDM_TPM_SUPPORT=ON requires -DDEVICE=tpm so IAK slot/vendor macros are defined")
 endif()
 
 set(SPDM_EMU_DIR ${PROJECT_SOURCE_DIR})
@@ -174,6 +196,11 @@ if (LIBSPDM_TPM_SUPPORT)
     endif ()
     message(STATUS "crypt_ext tpm supported enabled")
     add_definitions(-DLIBSPDM_TPM_SUPPORT=1)
+    set(LIBSPDM_ENABLE_MEASUREMENT_OPAQUE_DATA_EX ON)
+endif()
+
+if (LIBSPDM_ENABLE_MEASUREMENT_OPAQUE_DATA_EX)
+    add_definitions(-DLIBSPDM_ENABLE_MEASUREMENT_OPAQUE_DATA_EX=1)
 endif()
 
 if(ENABLE_BINARY_BUILD STREQUAL "1")

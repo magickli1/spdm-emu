@@ -363,6 +363,10 @@ void spdm_server_connection_state_callback(
     void *spdm_context, libspdm_connection_state_t connection_state)
 {
     bool res;
+#if LIBSPDM_TPM_SUPPORT
+    bool res_slot1 = false;
+    bool res_slot4 = false;
+#endif
     void *data;
     void *data1;
     void *data4;
@@ -508,16 +512,27 @@ void spdm_server_connection_state_callback(
                         NULL, NULL);
                 }
 
+                /* TPM uses slot 1 for the IAK certificate chain. */
+#if LIBSPDM_TPM_SUPPORT
+                res_slot1 = libspdm_read_responder_public_certificate_chain_per_slot(
+                    LIBSPDM_TPM_IAK_SLOT_ID,
+#else
                 res = libspdm_read_responder_public_certificate_chain_per_slot(
                     1,
+#endif
                     m_use_hash_algo,
                     m_use_asym_algo,
                     &data1, &data1_size,
                     NULL, NULL);
 
                 /* slot 4 uses a different leaf key (multi-key example). */
+#if LIBSPDM_TPM_SUPPORT
+                res_slot4 = libspdm_read_responder_public_certificate_chain_per_slot(
+                    4,
+#else
                 res = libspdm_read_responder_public_certificate_chain_per_slot(
                     4,
+#endif
                     m_use_hash_algo,
                     m_use_asym_algo,
                     &data4, &data4_size,
@@ -538,16 +553,27 @@ void spdm_server_connection_state_callback(
                         NULL, NULL);
                 }
 
+                /* TPM uses slot 1 for the IAK certificate chain. */
+#if LIBSPDM_TPM_SUPPORT
+                res_slot1 = libspdm_read_pqc_responder_public_certificate_chain_per_slot(
+                    LIBSPDM_TPM_IAK_SLOT_ID,
+#else
                 res = libspdm_read_pqc_responder_public_certificate_chain_per_slot(
                     1,
+#endif
                     m_use_hash_algo,
                     m_use_pqc_asym_algo,
                     &data1, &data1_size,
                     NULL, NULL);
 
                 /* slot 4 uses a different leaf key (multi-key example). */
+#if LIBSPDM_TPM_SUPPORT
+                res_slot4 = libspdm_read_pqc_responder_public_certificate_chain_per_slot(
+                    4,
+#else
                 res = libspdm_read_pqc_responder_public_certificate_chain_per_slot(
                     4,
+#endif
                     m_use_hash_algo,
                     m_use_pqc_asym_algo,
                     &data4, &data4_size,
@@ -568,17 +594,55 @@ void spdm_server_connection_state_callback(
                      * KeyPairID is the REAL device-global id of the negotiated algorithm's key pair:
                      * slots 0/1 use that algorithm's primary key pair, slot 4 its secondary
                      * (resolved by libspdm_get_key_pair_id_by_slot). */
+#if LIBSPDM_TPM_SUPPORT
+                    uint8_t populated_slot_id[3];
+                    void *slot_data[3];
+                    size_t slot_data_size[3];
+                    size_t multi_key_conn_rsp_size;
+#else
                     static const uint8_t populated_slot_id[] = { 0, 1, 4 };
                     void *slot_data[3];
                     size_t slot_data_size[3];
-                    size_t slot_index;
                     size_t multi_key_data_size;
+#endif
+                    size_t slot_index;
 
                     libspdm_zero_mem(&parameter, sizeof(parameter));
                     parameter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+#if LIBSPDM_TPM_SUPPORT
+                    multi_key_conn_rsp_size = sizeof(multi_key_conn_rsp);
+#else
                     multi_key_data_size = sizeof(multi_key_conn_rsp);
+#endif
                     multi_key_conn_rsp = false;
                     libspdm_get_data(spdm_context, LIBSPDM_DATA_MULTI_KEY_CONN_RSP, &parameter,
+#if LIBSPDM_TPM_SUPPORT
+                                     &multi_key_conn_rsp, &multi_key_conn_rsp_size);
+
+                    populated_slot_count = 0;
+                    populated_slot_id[populated_slot_count] = 0;
+                    slot_data[populated_slot_count] = data;
+                    slot_data_size[populated_slot_count] = data_size;
+                    populated_slot_count++;
+                    if (res_slot1) {
+                        populated_slot_id[populated_slot_count] = LIBSPDM_TPM_IAK_SLOT_ID;
+                        slot_data[populated_slot_count] = data1;
+                        slot_data_size[populated_slot_count] = data1_size;
+                        populated_slot_count++;
+                    }
+                    /* slot 4 is offered only for a multi-key connection that has its chain;
+                     * otherwise store an empty chain so a long-lived responder does not keep
+                     * slot 4 from an earlier connection. */
+                    populated_slot_id[populated_slot_count] = 4;
+                    if (multi_key_conn_rsp && res_slot4) {
+                        slot_data[populated_slot_count] = data4;
+                        slot_data_size[populated_slot_count] = data4_size;
+                    } else {
+                        slot_data[populated_slot_count] = NULL;
+                        slot_data_size[populated_slot_count] = 0;
+                    }
+                    populated_slot_count++;
+#else
                                      &multi_key_conn_rsp, &multi_key_data_size);
                     /* slot 4 (the distinct-key example) is provisioned only when this
                      * connection is multi-key; otherwise its cert chain data is empty,
@@ -591,6 +655,7 @@ void spdm_server_connection_state_callback(
                     slot_data_size[1] = data1_size;
                     slot_data_size[2] = multi_key_conn_rsp ? data4_size : 0;
                     populated_slot_count = (uint8_t)LIBSPDM_ARRAY_SIZE(populated_slot_id);
+#endif
 
                     libspdm_zero_mem(&parameter, sizeof(parameter));
                     parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
@@ -609,6 +674,11 @@ void spdm_server_connection_state_callback(
 #else
                         data8 = (uint8_t)(slot_index + 1);
 #endif
+#if LIBSPDM_TPM_SUPPORT
+                        if (populated_slot_id[slot_index] == LIBSPDM_TPM_IAK_SLOT_ID) {
+                            data8 = LIBSPDM_TPM_IAK_KEY_PAIR_ID;
+                        }
+#endif
                         libspdm_set_data(spdm_context,
                                          LIBSPDM_DATA_LOCAL_KEY_PAIR_ID,
                                          &parameter, &data8, sizeof(data8));
@@ -620,6 +690,11 @@ void spdm_server_connection_state_callback(
                                 SPDM_KEY_USAGE_BIT_MASK_CHALLENGE_USE |
                                 SPDM_KEY_USAGE_BIT_MASK_MEASUREMENT_USE |
                                 SPDM_KEY_USAGE_BIT_MASK_ENDPOINT_INFO_USE;
+#if LIBSPDM_TPM_SUPPORT
+                        if (populated_slot_id[slot_index] == LIBSPDM_TPM_IAK_SLOT_ID) {
+                            data16 = SPDM_KEY_USAGE_BIT_MASK_STANDARDS_KEY_USE;
+                        }
+#endif
                         libspdm_set_data(spdm_context,
                                          LIBSPDM_DATA_LOCAL_KEY_USAGE_BIT_MASK,
                                          &parameter, &data16, sizeof(data16));
@@ -743,6 +818,16 @@ void spdm_server_connection_state_callback(
 
         libspdm_zero_mem(&parameter, sizeof(parameter));
         parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+#if LIBSPDM_TPM_SUPPORT
+        /* Slot 0 is identity and slot 1 is the IAK when its chain is available. */
+        data8 = (uint8_t)(1u << 0);
+        if (res_slot1) {
+            data8 |= (uint8_t)(1u << LIBSPDM_TPM_IAK_SLOT_ID);
+        }
+        if (multi_key_conn_rsp && res_slot4) {
+            data8 |= (uint8_t)(1u << 4);
+        }
+#else
         /* Slots 0 and 1 are always populated. Slot 4 (the distinct-key multi-key example, a
          * non-contiguous SlotID; slots 2 and 3 stay empty) is only present in a multi-key
          * connection. */
@@ -750,6 +835,7 @@ void spdm_server_connection_state_callback(
         if (multi_key_conn_rsp) {
             data8 |= (1 << 4);
         }
+#endif
         libspdm_set_data(spdm_context, LIBSPDM_DATA_LOCAL_SUPPORTED_SLOT_MASK, &parameter,
                          &data8, sizeof(data8));
 
