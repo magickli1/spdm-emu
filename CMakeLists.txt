@@ -19,6 +19,8 @@ option(ENABLE_SYSTEMD "Install systemd service file" OFF)
 set(DEVICE ${DEVICE} CACHE STRING "Choose the test device: sample tpm, and default is sample" FORCE)
 
 option(LIBSPDM_TPM_SUPPORT "Add TPM support in crypt_ext" OFF)
+option(LIBSPDM_ENABLE_MEASUREMENT_OPAQUE_DATA_EX
+       "Use the extended measurement opaque-data callback" OFF)
 option(USE_SYSTEM_LIBSPDM "Use system provided libspdm" OFF)
 option(BUILD_VALIDATOR_SAMPLES "Build SPDM validator and attester samples (requires SPDM-Responder-Validator submodule)" ON)
 
@@ -28,6 +30,26 @@ endif()
 
 if (NOT DEVICE)
     set(DEVICE "sample")
+endif()
+
+if (DEVICE STREQUAL "tpm")
+    set(LIBSPDM_TPM_VENDOR_ID "0x1014" CACHE STRING "TCG SVH vendor ID for the device/evidence provider")
+    set(LIBSPDM_TPM_IAK_SLOT_ID "1" CACHE STRING "SPDM slot containing the TPM IAK certificate")
+    set(LIBSPDM_TPM_IAK_KEY_PAIR_ID "0xFE" CACHE STRING "Reserved KeyPairID for the TPM IAK")
+    set(LIBSPDM_TPM_IAK_BASE_ASYM_ALGO
+        "SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_ECDSA_ECC_NIST_P256"
+        CACHE STRING "SPDM algorithm identifier for the IAK public key")
+    set(LIBSPDM_TPM_IAK_BASE_HASH_ALGO
+        "SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_256"
+        CACHE STRING "SPDM algorithm identifier for IAK certificate validation")
+    add_definitions(-DLIBSPDM_TPM_IAK_SLOT_ID=${LIBSPDM_TPM_IAK_SLOT_ID})
+    add_definitions(-DLIBSPDM_TPM_IAK_KEY_PAIR_ID=${LIBSPDM_TPM_IAK_KEY_PAIR_ID})
+    add_definitions(-DLIBSPDM_TPM_VENDOR_ID=${LIBSPDM_TPM_VENDOR_ID})
+    add_definitions(-DLIBSPDM_TPM_IAK_BASE_ASYM_ALGO=${LIBSPDM_TPM_IAK_BASE_ASYM_ALGO})
+    add_definitions(-DLIBSPDM_TPM_IAK_BASE_HASH_ALGO=${LIBSPDM_TPM_IAK_BASE_HASH_ALGO})
+elseif (LIBSPDM_TPM_SUPPORT)
+    message(FATAL_ERROR
+        "LIBSPDM_TPM_SUPPORT=ON requires -DDEVICE=tpm so IAK slot/vendor macros are defined")
 endif()
 
 set(SPDM_EMU_DIR ${PROJECT_SOURCE_DIR})
@@ -40,10 +62,12 @@ endif()
 if (USE_SYSTEM_LIBSPDM)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(LIBSPDM REQUIRED libspdm)
-  pkg_get_variable(_LIBSPDM_INCLUDE_PATH libspdm includedir)
-  include_directories(
-    "${_LIBSPDM_INCLUDE_PATH}/include"
-  )
+  include_directories(${LIBSPDM_INCLUDE_DIRS})
+  link_directories(${LIBSPDM_LIBRARY_DIRS})
+  # The installed libspdm exports its configuration
+  # macros (-DLIBSPDM_*) through pkg-config.
+  add_definitions(${LIBSPDM_CFLAGS_OTHER})
+  list(APPEND LIBSPDM_LIBRARIES spdm_device_secret_lib_${DEVICE})
 else (USE_SYSTEM_LIBSPDM)
   set(LIBSPDM_DIR "${PROJECT_SOURCE_DIR}/libspdm")
   include_directories(
@@ -172,6 +196,11 @@ if (LIBSPDM_TPM_SUPPORT)
     endif ()
     message(STATUS "crypt_ext tpm supported enabled")
     add_definitions(-DLIBSPDM_TPM_SUPPORT=1)
+    set(LIBSPDM_ENABLE_MEASUREMENT_OPAQUE_DATA_EX ON)
+endif()
+
+if (LIBSPDM_ENABLE_MEASUREMENT_OPAQUE_DATA_EX)
+    add_definitions(-DLIBSPDM_ENABLE_MEASUREMENT_OPAQUE_DATA_EX=1)
 endif()
 
 if(ENABLE_BINARY_BUILD STREQUAL "1")
@@ -455,7 +484,15 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
         set(CMAKE_C_LINK_EXECUTABLE "")
 
     elseif(TOOLCHAIN STREQUAL "NONE")
-        set(CMAKE_C_LINK_EXECUTABLE   "<CMAKE_C_COMPILER> <FLAGS> <CMAKE_C_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> -static -Wl,--start-group <LINK_LIBRARIES> -Wl,--end-group")
+        if(USE_SYSTEM_LIBSPDM)
+            # Link the system libspdm and its dependencies (OpenSSL, TSS2, libc).
+            # Don't force -static: the system generally has no static archives
+            # for those, so a fully-static link would fail.
+            set(CMAKE_C_LINK_EXECUTABLE   "<CMAKE_C_COMPILER> <FLAGS> <CMAKE_C_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> -Wl,--start-group <LINK_LIBRARIES> -Wl,--end-group")
+        else()
+            # When using submodule libspdm, use static linking
+            set(CMAKE_C_LINK_EXECUTABLE   "<CMAKE_C_COMPILER> <FLAGS> <CMAKE_C_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> -static -Wl,--start-group <LINK_LIBRARIES> -Wl,--end-group")
+        endif()
 
     endif()
 
@@ -657,24 +694,28 @@ set(EXECUTABLE_OUTPUT_PATH ${PROJECT_BINARY_DIR}/bin)
 
 add_custom_target(copy_sample_key)
 
-if(CMAKE_SYSTEM_NAME MATCHES "Linux")
-    add_custom_command(TARGET copy_sample_key
-                    PRE_BUILD
-                    COMMAND cp -r -f ${LIBSPDM_DIR}/unit_test/sample_key/* ${EXECUTABLE_OUTPUT_PATH})
-elseif(CMAKE_SYSTEM_NAME MATCHES "Windows")
-    STRING(REPLACE "/" "\\" SRC ${LIBSPDM_DIR}/unit_test/sample_key/*)
-    if(CMAKE_GENERATOR MATCHES "^Visual Studio")
-        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-            STRING(REPLACE "/" "\\" DEST ${EXECUTABLE_OUTPUT_PATH}/Debug)
+if(NOT USE_SYSTEM_LIBSPDM)
+    if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+        add_custom_command(TARGET copy_sample_key
+                        PRE_BUILD
+                        COMMAND cp -r -f ${LIBSPDM_DIR}/unit_test/sample_key/* ${EXECUTABLE_OUTPUT_PATH})
+    elseif(CMAKE_SYSTEM_NAME MATCHES "Windows")
+        STRING(REPLACE "/" "\\" SRC ${LIBSPDM_DIR}/unit_test/sample_key/*)
+        if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+            if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+                STRING(REPLACE "/" "\\" DEST ${EXECUTABLE_OUTPUT_PATH}/Debug)
+            else()
+                STRING(REPLACE "/" "\\" DEST ${EXECUTABLE_OUTPUT_PATH}/Release)
+            endif()
         else()
-            STRING(REPLACE "/" "\\" DEST ${EXECUTABLE_OUTPUT_PATH}/Release)
+            STRING(REPLACE "/" "\\" DEST ${EXECUTABLE_OUTPUT_PATH})
         endif()
-    else()
-        STRING(REPLACE "/" "\\" DEST ${EXECUTABLE_OUTPUT_PATH})
+        add_custom_command(TARGET copy_sample_key
+                           PRE_BUILD
+                           COMMAND xcopy /y /s ${SRC} ${DEST})
     endif()
-    add_custom_command(TARGET copy_sample_key
-                       PRE_BUILD
-                       COMMAND xcopy /y /s ${SRC} ${DEST})
+else()
+    message(STATUS "Using system libspdm - sample keys not copied.")
 endif()
 
 if (NOT USE_SYSTEM_LIBSPDM)

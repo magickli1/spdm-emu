@@ -1,0 +1,151 @@
+@startuml
+title SPDM TPM Integration
+
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #30343b
+  LifeLineBorderColor #4a5160
+  ParticipantBorderColor #555b66
+  ParticipantBackgroundColor #eef1f7
+  NoteBackgroundColor #fffde0
+  NoteBorderColor #a6a06b
+}
+
+actor Requester
+participant Responder
+participant TPM
+participant "TPM Identity Key" as Identity
+participant "TPM IAK" as IAK
+
+group Connection negotiation
+Requester -> Responder: GET_VERSION
+Responder --> Requester: VERSION
+Requester -> Responder: GET_CAPABILITIES
+Responder --> Requester: CAPABILITIES
+Requester -> Responder: NEGOTIATE_ALGORITHMS
+Responder --> Requester: ALGORITHMS
+end
+
+group Responder identity authentication
+note over Requester, Responder
+DIGESTS advertises both identity and IAK slots.
+Both SlotIDs are retrieved with GET_CERTIFICATE
+before CHALLENGE. The IAK SlotID (e.g. slot 1)
+is reserved for Quote evidence verification and
+must not sign SPDM transcripts. libspdm still runs
+peer integrity/authority on GET_CERTIFICATE;
+IAK env RootHash / OOB policy is applied at Quote.
+end note
+Requester -> Responder: GET_DIGESTS
+Responder --> Requester: DIGESTS
+Requester -> Responder: GET_CERTIFICATE (identity SlotID)
+Responder -> TPM: TPM2_NV_Read(identity certificate)
+TPM --> Responder: CertificateChainFragment
+Responder --> Requester: CERTIFICATE
+
+Requester -> Responder: GET_CERTIFICATE (IAK SlotID)
+Responder -> TPM: TPM2_NV_Read(root cert;\nLIBSPDM_TPM_IAK_ROOT_CERT_INDEX)
+TPM --> Responder: Root DER (for RootHash)
+Responder -> TPM: TPM2_NV_Read(IAK certificate chain\nexcept root; sample: leaf only)
+TPM --> Responder: CertificateChainFragment\n(IAK leaf [+ intermediate CAs])
+Responder --> Requester: CERTIFICATE\n(spdm_cert_chain_t: RootHash +\nserved chain; sample: one leaf)
+note left of Requester
+Cache the full IAK CERTIFICATE
+(spdm_cert_chain_t) for Quote-time trust
+checks and leaf binding. libspdm peer
+integrity/authority may run here; do not
+apply LIBSPDM_TPM_IAK_* RootHash / OOB
+policy until Quote verification.
+end note
+
+Requester -> Responder: CHALLENGE (identity SlotID)
+Responder -> Identity: TPM2_Sign(Hash(transcript || nonce))
+Identity --> Responder: SPDM signature
+Responder --> Requester: CHALLENGE_AUTH
+note over Identity
+The TPM-backed responder identity key
+continues to sign SPDM transcripts.
+end note
+end
+
+group Signed GET_MEASUREMENTS with TPM Quote evidence
+note over Requester, Responder
+Quote opaque is generated and verified for
+ALL_MEASUREMENTS (--meas_op ALL) and for each
+signed single PCR hash index (--meas_op ONE_BY_ONE).
+Non-PCR indices use the SPDM L1 signature only.
+end note
+Requester -> Responder: GET_MEASUREMENTS\n(ALL or PCR index, GenerateSignature,\nrequester nonce)
+Responder -> TPM: TPM2_PCR_Read(selected PCR bank)
+TPM --> Responder: PCR values
+Responder -> IAK: TPM2_Quote(IAK, selected PCRs,\nrequester nonce)
+IAK --> Responder: TPM2B_ATTEST + TPMT_SIGNATURE
+note right of IAK
+IAK is restricted to attestation.
+It signs only TPM Quote evidence.
+It never signs an SPDM transcript.
+end note
+Responder -> Identity: TPM2_Sign(SPDM transcript,\nidentity SlotID)
+Identity --> Responder: SPDM signature
+Responder --> Requester: MEASUREMENTS\n(record + SPDM signature + Quote opaque evidence)
+note left of Requester
+Verify independently:
+* SPDM signature with identity certificate
+* Quote nonce, PCR selection and PCR digest
+* Cached IAK CERTIFICATE RootHash vs
+  configured root (LIBSPDM_TPM_IAK_ROOT_CERT_FILE)
+* Exclusive trust branch:
+  - if LIBSPDM_TPM_IAK_CERT_CHAIN_FILE is set:
+    verify that OOB chain to the configured
+    root and require its leaf byte-match the
+    SPDM slot leaf
+  - else: verify the SPDM slot chain
+    (root-excluded) to the configured root
+* Quote signature with the IAK slot leaf
+end note
+note over Requester, Responder
+Quote verification uses the cached IAK
+CERTIFICATE for the slot selected by opaque
+evidence; it does not re-issue GET_CERTIFICATE.
+end note
+end
+
+group Requester authentication
+Requester -> Responder: GET_ENCAPSULATED_REQUEST
+Responder --> Requester: Encapsulated GET_DIGESTS / GET_CERTIFICATE / CHALLENGE
+Requester -> Responder: DELIVER_ENCAPSULATED_RESPONSE
+Responder --> Requester: Requester authenticated
+end
+
+group Existing TPM-backed KEY_EXCHANGE (unchanged)
+Requester -> Responder: KEY_EXCHANGE
+Responder -> Identity: TPM2_<KEY>_ZGen
+Identity --> Responder: Shared secret
+Responder -> Identity: TPM2_Sign(Hash(KEY_EXCHANGE_RSP transcript))
+Identity --> Responder: SPDM signature
+Responder --> Requester: KEY_EXCHANGE_RSP
+note over Identity
+KEY_EXCHANGE keeps using the existing
+TPM-backed identity key path, not the IAK.
+end note
+
+Requester -> Responder: GET_ENCAPSULATED_REQUEST
+Responder --> Requester: Encapsulated requester authentication
+Requester -> Responder: DELIVER_ENCAPSULATED_RESPONSE
+Responder --> Requester: Requester authenticated for session
+Requester -> Responder: FINISH
+Responder --> Requester: FINISH_RSP
+end
+
+group Secured session
+Requester -> Responder: SECURED SPDM MESSAGE
+Responder --> Requester: SECURED SPDM MESSAGE
+Requester -> Responder: KEY_UPDATE
+Responder --> Requester: KEY_UPDATE_ACK
+Requester -> Responder: END_SESSION
+Responder -> TPM: TPM2_FlushContext
+TPM --> Responder: Session TPM objects flushed
+Responder --> Requester: END_SESSION_ACK
+end
+
+@enduml

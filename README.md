@@ -109,14 +109,24 @@ make
 
 ### TPM Setup (Optional)
 
-A helper script is provided to initialize a software TPM:
+Build with TPM device secret support, then provision a software TPM from
+`build/bin`:
 
-```
+```sh
+cmake -S . -B build -DARCH=x64 -DTOOLCHAIN=GCC \
+  -DTARGET=Debug -DCRYPTO=openssl \
+  -DDEVICE=tpm -DLIBSPDM_TPM_SUPPORT=ON
+cmake --build build -j
+
+export TPM2TOOLS_TCTI="swtpm:port=2321"
+export TPM2OPENSSL_TCTI="swtpm:port=2321"
 cd build/bin
-../../scripts/setup-tpm.sh --cleanup --start-swtpm
+../../script/setup-tpm.sh --cleanup --start-swtpm
 ```
 
-Please refer to [spdm_emu](https://github.com/DMTF/spdm-emu/blob/main/doc/tpm.md) for detail.
+Export both TCTI variables in every shell that runs the emulators. See
+[TPM Support](doc/tpm.md) for provisioning, Quote validation, and
+troubleshooting.
 
 ## Run Test
 

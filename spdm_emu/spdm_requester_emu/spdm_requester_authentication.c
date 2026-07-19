@@ -42,7 +42,12 @@ spdm_authentication(void *context, uint8_t *slot_mask,
     uint8_t requester_context[SPDM_REQ_CONTEXT_SIZE] = {
         0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
 
-    if ((m_exe_connection & EXE_CONNECTION_DIGEST) != 0) {
+    *slot_mask = 0;
+    if (((m_exe_connection & EXE_CONNECTION_DIGEST) != 0)
+#if LIBSPDM_TPM_SUPPORT
+        || ((m_exe_connection & EXE_CONNECTION_CERT) != 0)
+#endif
+        ) {
         status = libspdm_get_digest(context, NULL, slot_mask,
                                     total_digest_buffer);
         if (LIBSPDM_STATUS_IS_ERROR(status)) {
@@ -50,12 +55,20 @@ spdm_authentication(void *context, uint8_t *slot_mask,
         }
         for (index = 1; index < SPDM_MAX_SLOT_COUNT; index++) {
             if ((*slot_mask & (1 << index)) != 0) {
+#if LIBSPDM_TPM_SUPPORT
+                if (index == LIBSPDM_TPM_IAK_SLOT_ID) {
+                    continue;
+                }
+#endif
                 m_other_slot_id = index;
             }
         }
     }
 
     cert_chain_buffer_size = *cert_chain_size;
+#if LIBSPDM_TPM_SUPPORT
+    m_tpm_iak_cert_chain_size = 0;
+#endif
 
     if ((m_exe_connection & EXE_CONNECTION_CERT) != 0) {
         if (slot_id != 0xFF) {
@@ -65,7 +78,11 @@ spdm_authentication(void *context, uint8_t *slot_mask,
                 if (LIBSPDM_STATUS_IS_ERROR(status)) {
                     return status;
                 }
-                if (m_other_slot_id != 0) {
+                if ((m_other_slot_id != 0)
+#if LIBSPDM_TPM_SUPPORT
+                    && (m_other_slot_id != LIBSPDM_TPM_IAK_SLOT_ID)
+#endif
+                    ) {
                     *cert_chain_size = cert_chain_buffer_size;
                     libspdm_zero_mem(cert_chain, cert_chain_buffer_size);
                     status = libspdm_get_certificate(
@@ -82,6 +99,38 @@ spdm_authentication(void *context, uint8_t *slot_mask,
                 }
             }
         }
+#if LIBSPDM_TPM_SUPPORT
+        /*
+         * Cache the IAK CERTIFICATE whenever DIGESTS advertise the IAK slot,
+         * independent of the negotiated identity slot_id (including 0xFF
+         * pub-key-id mode). Quote verification requires this cache and does
+         * not re-issue GET_CERTIFICATE.
+         */
+        if ((*slot_mask & (1u << LIBSPDM_TPM_IAK_SLOT_ID)) != 0) {
+            *cert_chain_size = cert_chain_buffer_size;
+            libspdm_zero_mem(cert_chain, cert_chain_buffer_size);
+            status = libspdm_get_certificate(
+                context, NULL, LIBSPDM_TPM_IAK_SLOT_ID,
+                cert_chain_size, cert_chain);
+            if (LIBSPDM_STATUS_IS_ERROR(status)) {
+                return status;
+            }
+            if ((*cert_chain_size == 0) ||
+                (*cert_chain_size > sizeof(m_tpm_iak_cert_chain))) {
+                EMU_ERR(
+                    "IAK certificate chain size invalid for Quote cache (%zu)\n",
+                    *cert_chain_size);
+                m_tpm_iak_cert_chain_size = 0;
+                return LIBSPDM_STATUS_INVALID_MSG_SIZE;
+            }
+            libspdm_copy_mem(
+                m_tpm_iak_cert_chain, sizeof(m_tpm_iak_cert_chain),
+                cert_chain, *cert_chain_size);
+            m_tpm_iak_cert_chain_size = *cert_chain_size;
+            EMU_INFO("Cached IAK CERTIFICATE for Quote verification (slot %u)\n",
+                     (unsigned int)LIBSPDM_TPM_IAK_SLOT_ID);
+        }
+#endif
     }
 
     if ((m_exe_connection & EXE_CONNECTION_CHAL) != 0) {

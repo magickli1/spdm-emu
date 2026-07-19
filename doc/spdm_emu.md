@@ -43,6 +43,7 @@ This document describes spdm_requester_emu and spdm_responder_emu tool. It can b
          [--exe_session KEY_EX|PSK|NO_END|KEY_UPDATE|HEARTBEAT|MEAS|DIGEST|CERT|GET_CSR|SET_CERT|GET_KEY_PAIR_INFO|SET_KEY_PAIR_INFO|EP_INFO|APP]
          [--pcap <PcapFileName>]
          [--priv_key_mode PEM|RAW]
+         [--decap_tdisp]
          [--verbose | -v]
 
       NOTE:
@@ -93,7 +94,7 @@ This document describes spdm_requester_emu and spdm_responder_emu tool. It can b
                  The responder will save empty state, if the requester sets PRESERVE_NEGOTIATED_STATE_CLEAR bit in END_SESSION.
          [--load_state] is to load the negotiated state to current session from a read-only file.
                  The requester and responder will provision the state just after SPDM context is created.
-                 The user need guarantee the state file is generated correctly.
+                 The user needs to guarantee the state file is generated correctly.
                  The command line input - ver|cap|hash|meas_spec|meas_hash|asym|req_asym|dhe|aead|key_schedule|other_param are ignored.
                  The requester will skip GET_VERSION/GET_CAPABILITIES/NEGOTIATE_ALGORITHMS.
          [--exe_mode] is used to control the execution mode. By default, it is SHUTDOWN.
@@ -136,6 +137,7 @@ This document describes spdm_requester_emu and spdm_responder_emu tool. It can b
                  APP means send vendor defined message or application message in session.
          [--pcap] is used to generate PCAP dump file for offline analysis.
          [--priv_key_mode] is used to confirm private key mode with LIBSPDM_PRIVATE_KEY_USE_PEM.
+         [--decap_tdisp] additionally exposes TDISP directly, without SPDM encapsulation. This option is useful for emulated devices that need to know the TDISP state.
          [--verbose | -v] is used to enable verbose output. By default, only errors and essential messages are printed. When enabled, detailed platform transport traces and hex dumps are shown.
    ```
 
@@ -145,4 +147,31 @@ This document describes spdm_requester_emu and spdm_responder_emu tool. It can b
 
    [spdm_dump](https://github.com/DMTF/spdm-dump/blob/main/doc/spdm_dump.md) tool can be used to parse the pcap file for offline analysis.
 
-   NOTE: Not all combination is supported. Please file issue or submit patch for them if you find something is not expected.
+   NOTE: Not all combinations are supported. Please file issue or submit patch for them if you find something is not expected.
+
+## TPM / Quote (optional)
+
+TPM-backed responder keys and Quote measurement evidence require a TPM build
+(`-DDEVICE=tpm -DLIBSPDM_TPM_SUPPORT=ON`), provisioning with
+`script/setup-tpm.sh`, and dual TCTI exports in both emulator shells. See
+[TPM Support](tpm.md) for build, provisioning, and validation details.
+
+Minimal Quote CLI (after provisioning; requester must set
+`LIBSPDM_TPM_IAK_ROOT_CERT_FILE` to the provisioning root, for example
+`build/bin/root_ca_cert.der`):
+
+   ```
+   export TPM2TOOLS_TCTI="swtpm:port=2321"
+   export TPM2OPENSSL_TCTI="swtpm:port=2321"
+   export LIBSPDM_TPM_IAK_ROOT_CERT_FILE="$PWD/root_ca_cert.der"
+
+   ./spdm_responder_emu --ver 1.2 --other_param OPAQUE_FMT_1 \
+      --hash SHA_256 --meas_hash SHA_256 \
+      --asym ECDSA_P256 --req_asym ECDSA_P256
+   ./spdm_requester_emu --ver 1.2 --other_param OPAQUE_FMT_1 \
+      --hash SHA_256 --meas_hash SHA_256 \
+      --asym ECDSA_P256 --req_asym ECDSA_P256 \
+      --meas_op ALL --exe_conn CERT,MEAS
+   ```
+
+The requester must print `TPM Quote verification - PASS`.

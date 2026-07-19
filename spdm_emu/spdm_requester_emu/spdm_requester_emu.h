@@ -11,6 +11,8 @@
 #include "hal/library/memlib.h"
 #include "industry_standard/spdm_tcp_binding.h"
 #include "library/spdm_requester_lib.h"
+#include "library/spdm_common_lib.h"
+#include "library/spdm_crypt_ext_lib.h"
 #include "library/spdm_transport_none_lib.h"
 #include "library/spdm_transport_mctp_lib.h"
 #include "library/spdm_transport_pcidoe_lib.h"
@@ -27,5 +29,9 @@
 #include "spdm_emu.h"
 
 extern uint8_t m_other_slot_id;
+#if LIBSPDM_TPM_SUPPORT
+extern uint8_t m_tpm_iak_cert_chain[LIBSPDM_MAX_CERT_CHAIN_SIZE];
+extern size_t m_tpm_iak_cert_chain_size;
+#endif
 
 #endif

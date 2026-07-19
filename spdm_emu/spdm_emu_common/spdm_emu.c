@@ -52,7 +52,7 @@ void print_usage(const char *name)
     printf("   [--port <port_number>]\n");
     printf("   [--ver 1.0|1.1|1.2|1.3|1.4]\n");
     printf("   [--sec_ver 1.0|1.1|1.2]\n");
-    printf("   [--decap_tdisp\n");
+    printf("   [--decap_tdisp]\n");
     printf(
         "   [--cap CACHE|CERT|CHAL|MEAS_NO_SIG|MEAS_SIG|MEAS_FRESH|ENCRYPT|MAC|MUT_AUTH|KEY_EX|PSK|PSK_WITH_CONTEXT|ENCAP|HBEAT|KEY_UPD|HANDSHAKE_IN_CLEAR|PUB_KEY_ID|CHUNK|ALIAS_CERT|SET_CERT|CSR|CERT_INSTALL_RESET|EP_INFO_NO_SIG|EP_INFO_SIG|MEL|EVENT|MULTI_KEY_ONLY|MULTI_KEY_NEG|GET_KEY_PAIR_INFO|SET_KEY_PAIR_INFO|SET_KEY_PAIR_RESET|LARGE_RESP]\n");
     printf("   [--hash SHA_256|SHA_384|SHA_512|SHA3_256|SHA3_384|SHA3_512|SM3_256]\n");
@@ -73,7 +73,7 @@ void print_usage(const char *name)
     printf("   [--other_param OPAQUE_FMT_1|MULTI_KEY_CONN]\n");
     printf("   [--pqc_first FALSE|TRUE]\n");
     printf(
-        "   [--peer_cap CACHE|CERT|CHAL|MEAS_NO_SIG|MEAS_SIG|MEAS_FRESH|ENCRYPT|MAC|MUT_AUTH|KEY_EX|PSK|PSK_WITH_CONTEXT|ENCAP|HBEAT|KEY_UPD|HANDSHAKE_IN_CLEAR|PUB_KEY_ID|CHUNK|ALIAS_CERT|SET_CERT|CSR|CERT_INSTALL_RESET|EP_INFO_NO_SIG|EP_INFO_SIG|MEL|EVENT|MULTI_KEY_ONLY|MULTI_KEY_NEG|GET_KEY_PAIR_INFO|SET_KEY_PAIR_INFO]\n");
+        "   [--peer_cap CACHE|CERT|CHAL|MEAS_NO_SIG|MEAS_SIG|MEAS_FRESH|ENCRYPT|MAC|MUT_AUTH|KEY_EX|PSK|PSK_WITH_CONTEXT|ENCAP|HBEAT|KEY_UPD|HANDSHAKE_IN_CLEAR|PUB_KEY_ID|CHUNK|ALIAS_CERT|SET_CERT|CSR|CERT_INSTALL_RESET|EP_INFO_NO_SIG|EP_INFO_SIG|MEL|EVENT|MULTI_KEY_ONLY|MULTI_KEY_NEG|GET_KEY_PAIR_INFO|SET_KEY_PAIR_INFO|SET_KEY_PAIR_RESET|LARGE_RESP]\n");
     printf("   [--basic_mut_auth NO|BASIC]\n");
     printf("   [--mut_auth NO|WO_ENCAP|W_ENCAP|DIGESTS]\n");
     printf("   [--meas_sum NO|TCB|ALL]\n");
@@ -145,9 +145,9 @@ void print_usage(const char *name)
     printf(
         "   [--meas_sum] is the measurement summary hash type in CHALLENGE_AUTH, KEY_EXCHANGE_RSP and PSK_EXCHANGE_RSP. By default, ALL is used.\n");
     printf(
-        "   [--meas_op] is the measurement operation in GET_MEASUREMEMT. By default, ONE_BY_ONE is used.\n");
+        "   [--meas_op] is the measurement operation in GET_MEASUREMENT. By default, ONE_BY_ONE is used.\n");
     printf(
-        "   [--meas_att] is the measurement attribute in GET_MEASUREMEMT. By default, HASH is used.\n");
+        "   [--meas_att] is the measurement attribute in GET_MEASUREMENT. By default, HASH is used.\n");
     printf(
         "   [--key_upd] is the key update operation in KEY_UPDATE. By default, ALL is used. RSP will trigger encapsulated KEY_UPDATE.\n");
     printf(
@@ -162,7 +162,7 @@ void print_usage(const char *name)
         "   [--slot_count] is to select the local slot count. By default, 3 is used.  And the slot store cert chain continuously in emu.\n");
     printf("   [--save_state] is to save the current negotiated state to a write-only file.\n");
     printf(
-        "           The requester and responder will save state after GET_VERSION/GET_CAPABILLITIES/NEGOTIATE_ALGORITHMS.\n");
+        "           The requester and responder will save state after GET_VERSION/GET_CAPABILITIES/NEGOTIATE_ALGORITHMS.\n");
     printf(
         "           (negotiated state == ver|cap|hash|meas_spec|meas_hash|asym|req_asym|dhe|aead|key_schedule|other_param)\n");
     printf(
@@ -175,11 +175,11 @@ void print_usage(const char *name)
         "   [--load_state] is to load the negotiated state to current session from a read-only file.\n");
     printf(
         "           The requester and responder will provision the state just after SPDM context is created.\n");
-    printf("           The user need guarantee the state file is generated correctly.\n");
+    printf("           The user needs to guarantee the state file is generated correctly.\n");
     printf(
         "           The command line input - ver|cap|hash|meas_spec|meas_hash|asym|req_asym|dhe|aead|key_schedule|other_param are ignored.\n");
     printf(
-        "           The requester will skip GET_VERSION/GET_CAPABILLITIES/NEGOTIATE_ALGORITHMS.\n");
+        "           The requester will skip GET_VERSION/GET_CAPABILITIES/NEGOTIATE_ALGORITHMS.\n");
     printf("   [--exe_mode] is used to control the execution mode. By default, it is SHUTDOWN.\n");
     printf("           SHUTDOWN means the requester asks the responder to stop.\n");
     printf(
@@ -189,7 +189,7 @@ void print_usage(const char *name)
     printf(
         "           VER_ONLY means REQUESTER does not send GET_CAPABILITIES/NEGOTIATE_ALGORITHMS. It is used for quick symmetric authentication with PSK.\n");
     printf("               The version for responder must be provisioned from ver.\n");
-    printf("               The capablities for local and peer are from cap|peer_cap.\n");
+    printf("               The capabilities for local and peer are from cap|peer_cap.\n");
     printf(
         "               The negotiated algorithms are from hash|meas_spec|meas_hash|asym|req_asym|dhe|aead|key_schedule|other_param and they shall have at most 1 bit set.\n");
     printf("           VCA can be used when all other commands are skipped.\n");
@@ -222,7 +222,7 @@ void print_usage(const char *name)
     printf("           APP means send vendor defined message or application message in session.\n");
     printf("   [--pcap] is used to generate PCAP dump file for offline analysis.\n");
     printf(
-        "   [--priv_key_mode] is uesed to confirm private key mode with LIBSPDM_PRIVATE_KEY_USE_PEM.\n");
+        "   [--priv_key_mode] is used to confirm private key mode with LIBSPDM_PRIVATE_KEY_USE_PEM.\n");
     printf(
         "   [--verbose | -v] enables additional traces. By default, traces are suppressed.\n");
 }

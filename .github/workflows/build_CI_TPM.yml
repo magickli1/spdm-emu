@@ -35,6 +35,11 @@ jobs:
             --key-algorithm=ecc \
             --hash-algorithm=256
 
+      - name: Verify TCG IAK provisioning
+        run: |
+          cd build/bin
+          ../../script/test-tpm-provisioning.sh
+
       - name: Build
         run: |
           cmake -B build \
@@ -46,12 +51,355 @@ jobs:
 
           cmake --build build -j`nproc`
 
+      - name: Unit_Test_TPM_Quote
+        run: |
+          cmake -S libspdm -B build-libspdm-test \
+            -DTOOLCHAIN=GCC \
+            -DCRYPTO=openssl \
+            -DARCH=x64 -DTARGET=Debug \
+            -DLIBSPDM_TPM_SUPPORT=1
+          cmake --build build-libspdm-test --target test_crypt copy_sample_key -j`nproc`
+          cd build-libspdm-test/bin
+          ./test_crypt | tee test_crypt.log
+          grep -q "Pass: valid Quote" test_crypt.log
+          grep -q "Pass: bad nonce" test_crypt.log
+          grep -q "Pass: bad pcrDigest" test_crypt.log
+          grep -q "Pass: bad magic" test_crypt.log
+          grep -q "Pass: bad type" test_crypt.log
+          grep -q "Pass: wrong signature" test_crypt.log
+          grep -q "Pass: overridden bad pcrDigest" test_crypt.log
+
       - name: Emu_Test
         run: |
           cd build/bin
+          . ../../script/ci_tpm_emu_helpers.sh
+          export LIBSPDM_TPM_IAK_ROOT_CERT_FILE="$PWD/root_ca_cert.der"
+          export LIBSPDM_TPM_IAK_CERT_CHAIN_FILE="$PWD/iak_certchain.der"
 
-          ./spdm_responder_emu --hash SHA_256 --asym ECDSA_P256 --req_asym ECDSA_P256 &
-          sleep 5s
-          ./spdm_requester_emu --hash SHA_256 --asym ECDSA_P256 --req_asym ECDSA_P256 > requester.log
+          RESPONDER_PID=""
+          trap ci_tpm_cleanup_responder EXIT
 
-          sleep 10s
+          RESPONDER_LOG=responder.log ci_tpm_start_responder \
+            --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256
+          ./spdm_requester_emu --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256 \
+            --meas_op ALL --exe_conn CERT,MEAS > requester.log 2>&1
+          grep -q "TPM Quote verification - PASS" requester.log
+          grep -q "SPDM IAK slot RootHash match - PASS" requester.log
+          grep -q "verify_key_exchange_signature - PASS" requester.log
+          iak_cert_line=$(grep -n "Cached IAK CERTIFICATE for Quote verification" \
+            requester.log | head -n 1 | cut -d: -f1)
+          measurement_line=$(grep -n "SPDM_GET_MEASUREMENTS(0xe0)" requester.log |
+            head -n 1 | cut -d: -f1)
+          test -n "${iak_cert_line}"
+          test -n "${measurement_line}"
+          test "${iak_cert_line}" -lt "${measurement_line}"
+          ci_tpm_cleanup_responder
+          trap - EXIT
+
+      - name: Emu_Test ONE_BY_ONE Quote
+        run: |
+          cd build/bin
+          . ../../script/ci_tpm_emu_helpers.sh
+          export LIBSPDM_TPM_IAK_ROOT_CERT_FILE="$PWD/root_ca_cert.der"
+          export LIBSPDM_TPM_IAK_CERT_CHAIN_FILE="$PWD/iak_certchain.der"
+
+          RESPONDER_PID=""
+          trap ci_tpm_cleanup_responder EXIT
+
+          RESPONDER_LOG=responder-one-by-one.log ci_tpm_start_responder \
+            --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256
+          ./spdm_requester_emu --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256 \
+            --meas_op ONE_BY_ONE --exe_conn CERT,MEAS \
+            > requester-one-by-one.log 2>&1
+          grep -q "TPM Quote verification - PASS" requester-one-by-one.log
+          ci_tpm_cleanup_responder
+          trap - EXIT
+
+      - name: Emu_Test without external IAK chain
+        run: |
+          cd build/bin
+          . ../../script/ci_tpm_emu_helpers.sh
+          export LIBSPDM_TPM_IAK_ROOT_CERT_FILE="$PWD/root_ca_cert.der"
+          unset LIBSPDM_TPM_IAK_CERT_CHAIN_FILE
+
+          RESPONDER_PID=""
+          trap ci_tpm_cleanup_responder EXIT
+
+          # Sample IAK leaf is signed directly by root_ca, so root + SPDM
+          # slot leaf is enough without LIBSPDM_TPM_IAK_CERT_CHAIN_FILE.
+          RESPONDER_LOG=responder-iak-no-chain.log ci_tpm_start_responder \
+            --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256
+          ./spdm_requester_emu --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256 \
+            --meas_op ALL --exe_conn CERT,MEAS \
+            > requester-iak-no-chain.log 2>&1
+          grep -q "TPM Quote verification - PASS" requester-iak-no-chain.log
+          ci_tpm_cleanup_responder
+          trap - EXIT
+
+      - name: Emu_Test multi-cert IAK NV without external chain
+        run: |
+          cd build/bin
+          . ../../script/ci_tpm_emu_helpers.sh
+          export LIBSPDM_TPM_IAK_ROOT_CERT_FILE="$PWD/root_ca_cert.der"
+          unset LIBSPDM_TPM_IAK_CERT_CHAIN_FILE
+
+          RESPONDER_PID=""
+          cleanup() {
+            trap - EXIT
+            ci_tpm_cleanup_responder
+            # Restore sample leaf-only IAK NV for later CI steps.
+            # rewrite-tpm-iak-nv.sh cmp-verifies NV contents against the blob.
+            ../../script/rewrite-tpm-iak-nv.sh iak_cert.der
+          }
+          trap cleanup EXIT
+
+          test -f iak_nv_chain.der
+          ../../script/rewrite-tpm-iak-nv.sh iak_nv_chain.der
+
+          # intermediate||leaf in IAK NV; no LIBSPDM_TPM_IAK_CERT_CHAIN_FILE.
+          RESPONDER_LOG=responder-iak-multicert-nv.log ci_tpm_start_responder \
+            --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256
+          ./spdm_requester_emu --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256 \
+            --meas_op ALL --exe_conn CERT,MEAS \
+            > requester-iak-multicert-nv.log 2>&1
+          grep -q "TPM Quote verification - PASS" requester-iak-multicert-nv.log
+          grep -q "SPDM IAK slot RootHash match - PASS" requester-iak-multicert-nv.log
+          grep -q "Cached IAK CERTIFICATE for Quote verification" \
+            requester-iak-multicert-nv.log
+          cleanup
+
+      - name: Emu_Test OOB intermediates with intermediate-signed leaf NV
+        run: |
+          cd build/bin
+          . ../../script/ci_tpm_emu_helpers.sh
+          export LIBSPDM_TPM_IAK_ROOT_CERT_FILE="$PWD/root_ca_cert.der"
+          export LIBSPDM_TPM_IAK_CERT_CHAIN_FILE="$PWD/iak_oob_via_intermediate.der"
+
+          RESPONDER_PID=""
+          cleanup() {
+            trap - EXIT
+            ci_tpm_cleanup_responder
+            ../../script/rewrite-tpm-iak-nv.sh iak_cert.der
+          }
+          trap cleanup EXIT
+
+          test -f iak_cert_via_intermediate.der
+          test -f iak_oob_via_intermediate.der
+          ../../script/rewrite-tpm-iak-nv.sh iak_cert_via_intermediate.der
+
+          # NV = intermediate-signed leaf only; OOB = root||intermediate||leaf.
+          RESPONDER_LOG=responder-iak-oob-intermediate.log ci_tpm_start_responder \
+            --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256
+          ./spdm_requester_emu --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256 \
+            --meas_op ALL --exe_conn CERT,MEAS \
+            > requester-iak-oob-intermediate.log 2>&1
+          grep -q "TPM Quote verification - PASS" requester-iak-oob-intermediate.log
+          cleanup
+
+      - name: Reject missing IAK root
+        run: |
+          cd build/bin
+          . ../../script/ci_tpm_emu_helpers.sh
+          unset LIBSPDM_TPM_IAK_ROOT_CERT_FILE
+          unset LIBSPDM_TPM_IAK_CERT_CHAIN_FILE
+
+          RESPONDER_PID=""
+          trap ci_tpm_cleanup_responder EXIT
+
+          RESPONDER_LOG=responder-iak-root-negative.log ci_tpm_start_responder \
+            --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256
+          if ./spdm_requester_emu --ver 1.2 --other_param OPAQUE_FMT_1 \
+              --hash SHA_256 --meas_hash SHA_256 \
+              --asym ECDSA_P256 --req_asym ECDSA_P256 \
+              --meas_op ALL --exe_conn CERT,MEAS \
+              > requester-iak-root-negative.log 2>&1; then
+            echo "TPM Quote unexpectedly passed without an IAK root certificate"
+            exit 1
+          fi
+          grep -q "TPM Quote verification requires configured IAK root certificate" \
+            requester-iak-root-negative.log
+          ci_tpm_cleanup_responder
+          trap - EXIT
+
+      - name: Reject IAK RootHash mismatch
+        run: |
+          cd build/bin
+          . ../../script/ci_tpm_emu_helpers.sh
+          # Wrong trust-anchor file; slot RootHash is still hash(real root NV).
+          export LIBSPDM_TPM_IAK_ROOT_CERT_FILE="$PWD/responder_cert.der"
+          unset LIBSPDM_TPM_IAK_CERT_CHAIN_FILE
+
+          RESPONDER_PID=""
+          trap ci_tpm_cleanup_responder EXIT
+
+          RESPONDER_LOG=responder-iak-roothash-negative.log ci_tpm_start_responder \
+            --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256
+          if ./spdm_requester_emu --ver 1.2 --other_param OPAQUE_FMT_1 \
+              --hash SHA_256 --meas_hash SHA_256 \
+              --asym ECDSA_P256 --req_asym ECDSA_P256 \
+              --meas_op ALL --exe_conn CERT,MEAS \
+              > requester-iak-roothash-negative.log 2>&1; then
+            echo "TPM Quote unexpectedly passed with mismatched IAK RootHash"
+            exit 1
+          fi
+          grep -q "TPM Quote verification failed: SPDM IAK slot RootHash mismatch" \
+            requester-iak-roothash-negative.log
+          ci_tpm_cleanup_responder
+          trap - EXIT
+
+      - name: Reject root-in-IAK-NV
+        run: |
+          cd build/bin
+          . ../../script/ci_tpm_emu_helpers.sh
+          export LIBSPDM_TPM_IAK_ROOT_CERT_FILE="$PWD/root_ca_cert.der"
+          unset LIBSPDM_TPM_IAK_CERT_CHAIN_FILE
+
+          RESPONDER_PID=""
+          cleanup() {
+            trap - EXIT
+            ci_tpm_cleanup_responder
+            ../../script/rewrite-tpm-iak-nv.sh iak_cert.der
+          }
+          trap cleanup EXIT
+
+          # iak_certchain.der is root||leaf; responder must fail closed.
+          test -f iak_certchain.der
+          ../../script/rewrite-tpm-iak-nv.sh iak_certchain.der
+
+          RESPONDER_LOG=responder-iak-root-in-nv.log ci_tpm_start_responder \
+            --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256
+          if ./spdm_requester_emu --ver 1.2 --other_param OPAQUE_FMT_1 \
+              --hash SHA_256 --meas_hash SHA_256 \
+              --asym ECDSA_P256 --req_asym ECDSA_P256 \
+              --meas_op ALL --exe_conn CERT,MEAS \
+              > requester-iak-root-in-nv.log 2>&1; then
+            echo "IAK NV with embedded root unexpectedly succeeded"
+            exit 1
+          fi
+          grep -q "TPM Quote verification failed: SPDM IAK slot certificate was not retrieved during authentication" \
+            requester-iak-root-in-nv.log
+          cleanup
+
+      - name: Reject untrusted IAK chain
+        run: |
+          cd build/bin
+          . ../../script/ci_tpm_emu_helpers.sh
+          export LIBSPDM_TPM_IAK_ROOT_CERT_FILE="$PWD/responder_cert.der"
+          export LIBSPDM_TPM_IAK_CERT_CHAIN_FILE="$PWD/iak_certchain.der"
+
+          RESPONDER_PID=""
+          trap ci_tpm_cleanup_responder EXIT
+
+          RESPONDER_LOG=responder-iak-trust-negative.log ci_tpm_start_responder \
+            --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256
+          if ./spdm_requester_emu --ver 1.2 --other_param OPAQUE_FMT_1 \
+              --hash SHA_256 --meas_hash SHA_256 \
+              --asym ECDSA_P256 --req_asym ECDSA_P256 \
+              --meas_op ALL --exe_conn CERT,MEAS \
+              > requester-iak-trust-negative.log 2>&1; then
+            echo "TPM Quote unexpectedly passed with an untrusted IAK root"
+            exit 1
+          fi
+          grep -q "TPM Quote verification failed: untrusted IAK certificate chain" \
+            requester-iak-trust-negative.log
+          ci_tpm_cleanup_responder
+          trap - EXIT
+
+      - name: Reject mismatched external IAK chain
+        run: |
+          cd build/bin
+          . ../../script/ci_tpm_emu_helpers.sh
+          export LIBSPDM_TPM_IAK_ROOT_CERT_FILE="$PWD/root_ca_cert.der"
+          # OOB verifies to root but leaf != SPDM IAK slot leaf.
+          export LIBSPDM_TPM_IAK_CERT_CHAIN_FILE="$PWD/iak_wrong_leaf_chain.der"
+
+          RESPONDER_PID=""
+          trap ci_tpm_cleanup_responder EXIT
+
+          test -f iak_wrong_leaf_chain.der
+          RESPONDER_LOG=responder-iak-leaf-negative.log ci_tpm_start_responder \
+            --ver 1.2 --other_param OPAQUE_FMT_1 \
+            --hash SHA_256 --meas_hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256
+          if ./spdm_requester_emu --ver 1.2 --other_param OPAQUE_FMT_1 \
+              --hash SHA_256 --meas_hash SHA_256 \
+              --asym ECDSA_P256 --req_asym ECDSA_P256 \
+              --meas_op ALL --exe_conn CERT,MEAS \
+              > requester-iak-leaf-negative.log 2>&1; then
+            echo "TPM Quote unexpectedly passed with a mismatched IAK leaf"
+            exit 1
+          fi
+          grep -q "TPM Quote verification failed: IAK leaf does not match SPDM slot certificate" \
+            requester-iak-leaf-negative.log
+          ci_tpm_cleanup_responder
+          trap - EXIT
+
+      - name: Reject IAK transcript signing
+        run: |
+          cd build/bin
+          . ../../script/ci_tpm_emu_helpers.sh
+
+          RESPONDER_PID=""
+          trap ci_tpm_cleanup_responder EXIT
+
+          # SPDM 1.3 Multi-Key: IAK slot omits CHALLENGE_USE, so CHALLENGE is
+          # rejected before signing. Assert that specific closed-door path
+          # (not a transport/handshake failure).
+          RESPONDER_LOG=responder-iak-negative.log ci_tpm_start_responder \
+            --ver 1.3 --hash SHA_256 \
+            --asym ECDSA_P256 --req_asym ECDSA_P256
+          if ./spdm_requester_emu --ver 1.3 --hash SHA_256 \
+              --asym ECDSA_P256 --req_asym ECDSA_P256 \
+              --slot_id 1 --exe_conn CERT,CHAL \
+              > requester-iak-negative.log 2>&1; then
+            echo "IAK slot unexpectedly signed an SPDM transcript"
+            exit 1
+          fi
+          grep -q "SPDM_CHALLENGE(0x83)" responder-iak-negative.log
+          grep -q "SPDM_ERROR(0x7f)" responder-iak-negative.log
+          if grep -q "SPDM_CHALLENGE_AUTH" responder-iak-negative.log; then
+            echo "IAK slot unexpectedly produced CHALLENGE_AUTH"
+            exit 1
+          fi
+          grep -q "do_authentication_via_spdm" requester-iak-negative.log
+          ci_tpm_cleanup_responder
+          trap - EXIT
+
+      - name: Upload TPM emu logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tpm-emu-logs
+          path: |
+            build/bin/*requester*.log
+            build/bin/*responder*.log
+            build-libspdm-test/bin/test_crypt.log
+          if-no-files-found: ignore

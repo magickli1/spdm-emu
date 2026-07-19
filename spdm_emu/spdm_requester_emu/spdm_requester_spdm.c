@@ -554,18 +554,28 @@ void *spdm_client_init(void)
             }
         }
         if (m_use_asym_algo != 0) {
-            res = libspdm_read_responder_root_public_certificate_slot(1,
-                                                                      m_use_hash_algo,
-                                                                      m_use_asym_algo,
-                                                                      &data1, &data1_size,
-                                                                      &hash1, &hash1_size);
+            res = libspdm_read_responder_root_public_certificate_slot(
+#if LIBSPDM_TPM_SUPPORT
+                LIBSPDM_TPM_IAK_SLOT_ID,
+#else
+                1,
+#endif
+                m_use_hash_algo,
+                m_use_asym_algo,
+                &data1, &data1_size,
+                &hash1, &hash1_size);
         }
         if (m_use_pqc_asym_algo != 0) {
-            res = libspdm_read_pqc_responder_root_public_certificate_slot(1,
-                                                                          m_use_hash_algo,
-                                                                          m_use_pqc_asym_algo,
-                                                                          &data1, &data1_size,
-                                                                          &hash1, &hash1_size);
+            res = libspdm_read_pqc_responder_root_public_certificate_slot(
+#if LIBSPDM_TPM_SUPPORT
+                LIBSPDM_TPM_IAK_SLOT_ID,
+#else
+                1,
+#endif
+                m_use_hash_algo,
+                m_use_pqc_asym_algo,
+                &data1, &data1_size,
+                &hash1, &hash1_size);
         }
         if ((m_use_asym_algo != 0) || (m_use_pqc_asym_algo != 0)) {
             if (res) {
@@ -575,6 +585,9 @@ void *spdm_client_init(void)
                     &root_cert1, &root_cert1_size);
                 libspdm_zero_mem(&parameter, sizeof(parameter));
                 parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+                /* Appends another peer root (does not replace identity slot-0
+                 * root). IAK and identity roots may differ; Quote policy uses
+                 * LIBSPDM_TPM_IAK_ROOT_CERT_FILE independently. */
                 libspdm_set_data(spdm_context,
                                 LIBSPDM_DATA_PEER_PUBLIC_ROOT_CERT,
                                 &parameter, (void *)root_cert1, root_cert1_size);
