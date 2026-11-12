@@ -170,6 +170,9 @@ if (LIBSPDM_TPM_SUPPORT)
     endif ()
     message(STATUS "crypt_ext tpm supported enabled")
     add_definitions(-DLIBSPDM_TPM_SUPPORT=1)
+    # One IAK slot value for the libspdm TPM backend (keys.h), the responder and the requester.
+    set(LIBSPDM_TPM_IAK_SLOT_ID "5" CACHE STRING "SPDM slot ID of the TPM IAK certificate chain")
+    add_definitions(-DLIBSPDM_TPM_IAK_SLOT_ID=${LIBSPDM_TPM_IAK_SLOT_ID})
 endif()
 
 if(ENABLE_BINARY_BUILD STREQUAL "1")

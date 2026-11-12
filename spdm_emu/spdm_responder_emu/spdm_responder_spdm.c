@@ -5,6 +5,9 @@
  **/
 
 #include "spdm_responder_emu.h"
+#if LIBSPDM_TPM_SUPPORT
+#include "library/spdm_tpm_quote_opaque.h"
+#endif
 
 void *m_spdm_context;
 #if LIBSPDM_FIPS_MODE
@@ -404,6 +407,85 @@ static bool spdm_server_write_assoc_cert_slot_mask(void *spdm_context, uint8_t k
 }
 #endif
 
+#if LIBSPDM_TPM_SUPPORT
+/**
+ * Provision the TPM IAK certificate chain on its dedicated slot.
+ *
+ * The IAK is a restricted TPM signing key: it signs TPM2_Quote evidence carried in
+ * MEASUREMENTS.OpaqueData and never an SPDM transcript. The IAK slot is not in
+ * LIBSPDM_TPM_RESPONDER_SLOT_IDS, so sign.c never resolves it to the IAK handle. Its slot
+ * advertises only StandardsKeyUse (KeyUsageMask, enforced by libspdm in multi-key connections).
+ * Rejecting CHALLENGE / MEASUREMENTS / KEY_EXCHANGE on the IAK slot in SPDM 1.2 or non multi-key
+ * connections is open (DMTF/libspdm#3721, question 2); there the identity key signs and the
+ * requester verification against the IAK chain fails.
+ *
+ * The TPM backend assigns the IAK its own device-global KeyPairID in multi-key connections.
+ **/
+static void spdm_provision_tpm_iak_slot(void *spdm_context, bool multi_key_conn_rsp)
+{
+    static void *iak_cert_chain;
+    libspdm_data_parameter_t parameter;
+    libspdm_return_t status;
+    void *data;
+    size_t data_size;
+    uint8_t iak_slot_id;
+    uint8_t key_pair_id;
+    uint8_t data8;
+    uint16_t data16;
+    bool res;
+
+    iak_slot_id = LIBSPDM_TPM_IAK_SLOT_ID;
+    data = NULL;
+    data_size = 0;
+    res = false;
+    key_pair_id = 0;
+    if (multi_key_conn_rsp) {
+        key_pair_id = libspdm_tpm_get_key_pair_id_by_slot(
+            false, m_use_asym_algo, m_use_pqc_asym_algo, iak_slot_id);
+    }
+    if ((m_use_asym_algo != 0) && (!multi_key_conn_rsp || key_pair_id != 0)) {
+        /* the TPM backend maps the IAK slot to the IAK certificate chain */
+        res = libspdm_read_responder_public_certificate_chain_per_slot(
+            iak_slot_id, m_use_hash_algo, m_use_asym_algo, &data, &data_size, NULL, NULL);
+        if (!res) {
+            EMU_INFO("Slot %d: IAK certificate chain not loaded, not provisioned\n",
+                     iak_slot_id);
+        }
+    } else if (multi_key_conn_rsp) {
+        EMU_ERR("Slot %d: no matching TPM IAK key pair\n", iak_slot_id);
+    }
+
+    libspdm_zero_mem(&parameter, sizeof(parameter));
+    parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+    parameter.additional_data[0] = iak_slot_id;
+    status = libspdm_set_data(spdm_context, LIBSPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN, &parameter,
+                              res ? data : NULL, res ? data_size : 0);
+    if (LIBSPDM_STATUS_IS_ERROR(status)) {
+        free(data);
+        return;
+    }
+    /* The library borrows the chain; release our previous allocation on re-negotiation. */
+    free(iak_cert_chain);
+    iak_cert_chain = res ? data : NULL;
+    if (!res) {
+        return;
+    }
+
+    data8 = key_pair_id;
+    libspdm_set_data(spdm_context, LIBSPDM_DATA_LOCAL_KEY_PAIR_ID, &parameter,
+                     &data8, sizeof(data8));
+    data8 = SPDM_CERTIFICATE_INFO_CERT_MODEL_GENERIC_CERT;
+    libspdm_set_data(spdm_context, LIBSPDM_DATA_LOCAL_CERT_INFO, &parameter,
+                     &data8, sizeof(data8));
+    data16 = SPDM_KEY_USAGE_BIT_MASK_STANDARDS_KEY_USE;
+    libspdm_set_data(spdm_context, LIBSPDM_DATA_LOCAL_KEY_USAGE_BIT_MASK, &parameter,
+                     &data16, sizeof(data16));
+    EMU_INFO("Slot %d: TPM IAK certificate chain provisioned (quote evidence only)\n",
+             iak_slot_id);
+    /* do not free it*/
+}
+#endif /* LIBSPDM_TPM_SUPPORT */
+
 /**
  * Notify the connection state to an SPDM context register.
  *
@@ -730,7 +812,11 @@ void spdm_server_connection_state_callback(
                                          &parameter, slot_data[slot_index],
                                          slot_data_size[slot_index]);
                         /* real, algorithm-matched, contiguous KeyPairID for this slot. */
-#if LIBSPDM_ENABLE_CAPABILITY_GET_KEY_PAIR_INFO_CAP
+#if LIBSPDM_TPM_SUPPORT
+                        data8 = libspdm_tpm_get_key_pair_id_by_slot(
+                            false, m_use_asym_algo, m_use_pqc_asym_algo,
+                            populated_slot_id[slot_index]);
+#elif LIBSPDM_ENABLE_CAPABILITY_GET_KEY_PAIR_INFO_CAP
                         data8 = libspdm_get_key_pair_id_by_slot(
                             m_use_asym_algo, m_use_pqc_asym_algo, populated_slot_id[slot_index]);
 #else
@@ -754,6 +840,9 @@ void spdm_server_connection_state_callback(
                     /* do not free it*/
                 }
             }
+#if LIBSPDM_TPM_SUPPORT
+            spdm_provision_tpm_iak_slot(spdm_context, multi_key_conn_rsp);
+#endif
         }
 
         req_slot_mask = 0;
@@ -976,6 +1065,9 @@ void spdm_server_connection_state_callback(
         if (multi_key_conn_rsp) {
             data8 |= (1 << 4);
         }
+#if LIBSPDM_TPM_SUPPORT
+        data8 |= (1 << LIBSPDM_TPM_IAK_SLOT_ID);
+#endif
         libspdm_set_data(spdm_context, LIBSPDM_DATA_LOCAL_SUPPORTED_SLOT_MASK, &parameter,
                          &data8, sizeof(data8));
 

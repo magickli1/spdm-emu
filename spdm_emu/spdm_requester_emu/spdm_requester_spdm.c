@@ -5,6 +5,7 @@
  **/
 
 #include "spdm_requester_emu.h"
+#include "tpm_quote_verify.h"
 
 /* Internal libspdm API (declared in internal/libspdm_requester_lib.h, which cannot be
  * included here without conflicting definitions); used by the SUPPORTED_ALGO probe to
@@ -424,6 +425,9 @@ void *spdm_client_init(void)
         }
     } else if (m_load_state_file_name == NULL) {
         /* Skip if state is loaded*/
+#if LIBSPDM_ENABLE_CAPABILITY_MEAS_CAP && LIBSPDM_TPM_SUPPORT
+        spdm_tpm_quote_reset_peer_identity();
+#endif
         status = libspdm_init_connection(
             spdm_context,
             (m_exe_connection & EXE_CONNECTION_VERSION_ONLY) != 0);
@@ -764,7 +768,11 @@ void *spdm_client_init(void)
                                  &parameter, slot_data[slot_index],
                                  slot_data_size[slot_index]);
                 /* real, algorithm-matched, contiguous KeyPairID for this slot. */
-#if LIBSPDM_ENABLE_CAPABILITY_GET_KEY_PAIR_INFO_CAP
+#if LIBSPDM_TPM_SUPPORT
+                data8 = libspdm_tpm_get_key_pair_id_by_slot(
+                    true, m_use_req_asym_algo, m_use_req_pqc_asym_algo,
+                    populated_slot_id[slot_index]);
+#elif LIBSPDM_ENABLE_CAPABILITY_GET_KEY_PAIR_INFO_CAP
                 data8 = libspdm_get_key_pair_id_by_slot(
                     m_use_req_asym_algo, m_use_req_pqc_asym_algo,
                     populated_slot_id[slot_index]);

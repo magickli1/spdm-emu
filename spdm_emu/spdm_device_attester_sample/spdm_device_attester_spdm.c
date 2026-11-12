@@ -5,6 +5,7 @@
  **/
 
 #include "spdm_device_attester_sample.h"
+#include "tpm_quote_verify.h"
 
 void *m_spdm_context;
 void *m_scratch_buffer;
@@ -230,6 +231,9 @@ void *spdm_client_init(void)
     libspdm_set_data(spdm_context, LIBSPDM_DATA_MEL_SPEC, &parameter,
                      &data8, sizeof(data8));
 
+#if LIBSPDM_ENABLE_CAPABILITY_MEAS_CAP && LIBSPDM_TPM_SUPPORT
+    spdm_tpm_quote_reset_peer_identity();
+#endif
     status = libspdm_init_connection(spdm_context, false);
     if (LIBSPDM_STATUS_IS_ERROR(status)) {
         printf("libspdm_init_connection - 0x%x\n", (uint32_t)status);

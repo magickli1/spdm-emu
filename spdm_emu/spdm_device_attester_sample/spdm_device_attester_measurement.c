@@ -5,6 +5,10 @@
  **/
 
 #include "spdm_device_attester_sample.h"
+#include "tpm_quote_verify.h"
+#if LIBSPDM_TPM_SUPPORT
+#include "library/spdm_tpm_pcr.h"
+#endif
 
 /**
  * This function executes SPDM measurement and extend to TPM.
@@ -27,17 +31,42 @@ libspdm_return_t spdm_send_receive_get_measurement(void *spdm_context,
     uint8_t index;
     uint8_t request_attribute;
     uint32_t measurement_record_offset;
+    uint8_t opaque_data[SPDM_MAX_OPAQUE_DATA_SIZE];
+    size_t opaque_data_size;
+    uint8_t requester_nonce[SPDM_NONCE_SIZE];
+    uint8_t responder_nonce[SPDM_NONCE_SIZE];
+#if LIBSPDM_TPM_SUPPORT
+    libspdm_data_parameter_t parameter;
+    uint8_t peer_slot_mask;
+    size_t data_size;
+
+    libspdm_zero_mem(&parameter, sizeof(parameter));
+    parameter.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+    data_size = sizeof(peer_slot_mask);
+    status = libspdm_get_data(spdm_context, LIBSPDM_DATA_PEER_PROVISIONED_SLOT_MASK,
+                              &parameter, &peer_slot_mask, &data_size);
+    if (LIBSPDM_STATUS_IS_ERROR(status)) {
+        return status;
+    }
+#endif
 
     /* request all at one time.*/
 
     request_attribute =
         SPDM_GET_MEASUREMENTS_REQUEST_ATTRIBUTES_GENERATE_SIGNATURE;
-    status = libspdm_get_measurement(
+    opaque_data_size = sizeof(opaque_data);
+    status = libspdm_get_measurement_ex2(
         spdm_context, session_id, request_attribute,
         SPDM_GET_MEASUREMENTS_REQUEST_MEASUREMENT_OPERATION_ALL_MEASUREMENTS,
-        slot_id, NULL, &number_of_block,
-        measurement_record_length, measurement_record);
+        slot_id, NULL, NULL, &number_of_block,
+        measurement_record_length, measurement_record,
+        NULL, requester_nonce, responder_nonce, opaque_data, &opaque_data_size);
     if (status == LIBSPDM_STATUS_SUCCESS) {
+#if LIBSPDM_TPM_SUPPORT
+        return spdm_tpm_verify_signed_measurement(spdm_context, session_id, slot_id,
+                                                  measurement_record, *measurement_record_length,
+                                                  requester_nonce, opaque_data, opaque_data_size);
+#endif
         return status;
     }
 
@@ -70,14 +99,33 @@ libspdm_return_t spdm_send_receive_get_measurement(void *spdm_context,
             request_attribute = m_use_measurement_attribute |
                                 SPDM_GET_MEASUREMENTS_REQUEST_ATTRIBUTES_GENERATE_SIGNATURE;
         }
+#if LIBSPDM_TPM_SUPPORT
+        if (((peer_slot_mask & (1u << SPDM_TPM_IAK_CERT_SLOT_ID)) != 0) &&
+            (libspdm_tpm_measurement_pcr_index(index) < LIBSPDM_TPM_PCR_COUNT)) {
+            request_attribute |= SPDM_GET_MEASUREMENTS_REQUEST_ATTRIBUTES_GENERATE_SIGNATURE;
+        }
+#endif
         one_measurement_record_length = sizeof(one_measurement_record);
-        status = libspdm_get_measurement(
+        opaque_data_size = sizeof(opaque_data);
+        status = libspdm_get_measurement_ex2(
             spdm_context, session_id, request_attribute,
-            index, slot_id, NULL, &number_of_block,
-            &one_measurement_record_length, one_measurement_record);
+            index, slot_id, NULL, NULL, &number_of_block,
+            &one_measurement_record_length, one_measurement_record,
+            NULL, requester_nonce, responder_nonce, opaque_data, &opaque_data_size);
         if (LIBSPDM_STATUS_IS_ERROR(status)) {
             continue;
         }
+#if LIBSPDM_TPM_SUPPORT
+        if ((request_attribute & SPDM_GET_MEASUREMENTS_REQUEST_ATTRIBUTES_GENERATE_SIGNATURE) !=
+            0) {
+            status = spdm_tpm_verify_signed_measurement(
+                spdm_context, session_id, slot_id, one_measurement_record,
+                one_measurement_record_length, requester_nonce, opaque_data, opaque_data_size);
+            if (LIBSPDM_STATUS_IS_ERROR(status)) {
+                return status;
+            }
+        }
+#endif
         received_number_of_block += 1;
 
         LIBSPDM_ASSERT (*measurement_record_length >= measurement_record_offset);

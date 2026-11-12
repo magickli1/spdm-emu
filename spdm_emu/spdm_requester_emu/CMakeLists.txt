@@ -33,6 +33,13 @@ set(src_spdm_requester_emu
     ${PROJECT_SOURCE_DIR}/spdm_emu/spdm_emu_common/support.c
 )
 
+# TPM2_Quote evidence verification (MEASUREMENTS.OpaqueData).
+if (LIBSPDM_TPM_SUPPORT)
+    list(APPEND src_spdm_requester_emu
+        ${PROJECT_SOURCE_DIR}/spdm_emu/spdm_emu_common/tpm_quote_verify.c
+    )
+endif()
+
 # Linux kernel AF_MCTP socket transport is Linux-specific; only build it there.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND src_spdm_requester_emu

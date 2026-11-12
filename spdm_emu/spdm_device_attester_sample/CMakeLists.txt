@@ -27,6 +27,13 @@ set(src_spdm_device_attester_sample
     ${PROJECT_SOURCE_DIR}/spdm_emu/spdm_emu_common/support.c
 )
 
+# TPM2_Quote evidence verification (MEASUREMENTS.OpaqueData).
+if (LIBSPDM_TPM_SUPPORT)
+    list(APPEND src_spdm_device_attester_sample
+        ${PROJECT_SOURCE_DIR}/spdm_emu/spdm_emu_common/tpm_quote_verify.c
+    )
+endif()
+
 if (USE_SYSTEM_LIBSPDM)
   add_executable(spdm_device_attester_sample ${src_spdm_device_attester_sample})
   target_link_libraries(spdm_device_attester_sample PRIVATE
