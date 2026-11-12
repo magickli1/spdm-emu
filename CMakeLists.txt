@@ -170,6 +170,14 @@ if (LIBSPDM_TPM_SUPPORT)
     endif ()
     message(STATUS "crypt_ext tpm supported enabled")
     add_definitions(-DLIBSPDM_TPM_SUPPORT=1)
+    # Match the TCG DevID key and certificate indices provisioned by script/setup-tpm.sh.
+    set(LIBSPDM_TPM_RESPONDER_HANDLES "0x81020000;0x81020000;0x81020000" CACHE STRING
+        "Semicolon-separated list of TPM Responder Handle Strings")
+    set(LIBSPDM_TPM_RESPONDER_CERTCHAINS "0x01C90200;0x01C90200;0x01C90200" CACHE STRING
+        "Semicolon-separated list of TPM Responder Certificate Chain NV Indices")
+    # One IAK slot value for the libspdm TPM backend (keys.h), the responder and the requester.
+    set(LIBSPDM_TPM_IAK_SLOT_ID "5" CACHE STRING "SPDM slot ID of the TPM IAK certificate chain")
+    add_definitions(-DLIBSPDM_TPM_IAK_SLOT_ID=${LIBSPDM_TPM_IAK_SLOT_ID})
 endif()
 
 if(ENABLE_BINARY_BUILD STREQUAL "1")

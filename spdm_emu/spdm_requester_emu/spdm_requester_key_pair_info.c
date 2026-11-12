@@ -36,23 +36,32 @@ libspdm_return_t do_get_key_pair_info_via_spdm(const uint32_t *session_id)
     spdm_context = m_spdm_context;
 
     key_pair_id = 1;
-    public_key_info_len = SPDM_MAX_PUBLIC_KEY_INFO_LEN;
-
-    status = libspdm_get_key_pair_info(spdm_context, session_id,
-                                       key_pair_id, &total_key_pairs,
-                                       &capabilities,
-                                       &key_usage_capabilities,
-                                       &current_key_usage,
-                                       &asym_algo_capabilities,
-                                       &current_asym_algo,
-                                       &pqc_asym_algo_capabilities,
-                                       &current_pqc_asym_algo,
-                                       &assoc_cert_slot_mask,
-                                       &public_key_info_len,
-                                       public_key_info);
-    if (LIBSPDM_STATUS_IS_ERROR(status)) {
-        return status;
-    }
+    do {
+        public_key_info_len = SPDM_MAX_PUBLIC_KEY_INFO_LEN;
+        status = libspdm_get_key_pair_info(spdm_context, session_id,
+                                           key_pair_id, &total_key_pairs,
+                                           &capabilities,
+                                           &key_usage_capabilities,
+                                           &current_key_usage,
+                                           &asym_algo_capabilities,
+                                           &current_asym_algo,
+                                           &pqc_asym_algo_capabilities,
+                                           &current_pqc_asym_algo,
+                                           &assoc_cert_slot_mask,
+                                           &public_key_info_len,
+                                           public_key_info);
+        if (LIBSPDM_STATUS_IS_ERROR(status)) {
+            return status;
+        }
+#if LIBSPDM_TPM_SUPPORT
+        if (key_pair_id == total_key_pairs) {
+            break;
+        }
+        key_pair_id++;
+#else
+        break;
+#endif
+    } while (true);
 
     return LIBSPDM_STATUS_SUCCESS;
 }
@@ -79,11 +88,36 @@ libspdm_return_t do_set_key_pair_info_via_spdm(const uint32_t *session_id)
     uint32_t desired_asym_algo;
     uint32_t desired_pqc_asym_algo;
     uint8_t desired_assoc_cert_slot_mask;
+#if LIBSPDM_TPM_SUPPORT && LIBSPDM_ENABLE_CAPABILITY_GET_KEY_PAIR_INFO_CAP
+    uint8_t total_key_pairs;
+    uint8_t assoc_cert_slot_mask;
+    uint16_t capabilities;
+    uint16_t usages[2];
+    uint32_t algorithms[4];
+    uint16_t public_key_info_len;
+    uint8_t public_key_info[SPDM_MAX_PUBLIC_KEY_INFO_LEN];
+#endif
 
     spdm_context = m_spdm_context;
 
     /*change: disconnect the association with the slot*/
     key_pair_id = 1;
+#if LIBSPDM_TPM_SUPPORT && LIBSPDM_ENABLE_CAPABILITY_GET_KEY_PAIR_INFO_CAP
+    public_key_info_len = sizeof(public_key_info);
+    status = libspdm_get_key_pair_info(
+        spdm_context, session_id, key_pair_id, &total_key_pairs, &capabilities,
+        &usages[0], &usages[1], &algorithms[0], &algorithms[1], &algorithms[2],
+        &algorithms[3], &assoc_cert_slot_mask, &public_key_info_len, public_key_info);
+    if (LIBSPDM_STATUS_IS_ERROR(status)) {
+        return status;
+    }
+    /* This sample performs both CHANGE and ERASE. Pre-provisioned TPM keys cannot be erased. */
+    if ((capabilities & (SPDM_KEY_PAIR_CAP_CERT_ASSOC_CAP | SPDM_KEY_PAIR_CAP_ERASABLE_CAP)) !=
+        (SPDM_KEY_PAIR_CAP_CERT_ASSOC_CAP | SPDM_KEY_PAIR_CAP_ERASABLE_CAP)) {
+        EMU_INFO("Key pair %d does not support the CHANGE/ERASE sample; skipped\n", key_pair_id);
+        return LIBSPDM_STATUS_SUCCESS;
+    }
+#endif
     operation = SPDM_SET_KEY_PAIR_INFO_CHANGE_OPERATION;
     desired_key_usage = 0;
     desired_asym_algo = 0;

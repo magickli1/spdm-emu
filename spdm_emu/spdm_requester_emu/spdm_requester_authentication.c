@@ -5,6 +5,7 @@
  **/
 
 #include "spdm_requester_emu.h"
+#include "tpm_quote_verify.h"
 
 #if (LIBSPDM_ENABLE_CAPABILITY_CERT_CAP && LIBSPDM_ENABLE_CAPABILITY_CHAL_CAP)
 
@@ -49,6 +50,13 @@ spdm_authentication(void *context, uint8_t *slot_mask,
             return status;
         }
         for (index = 1; index < SPDM_MAX_SLOT_COUNT; index++) {
+#if LIBSPDM_TPM_SUPPORT
+            /* The TPM IAK slot only carries the Quote evidence certificate; it is never
+             * used for CHALLENGE / MEASUREMENTS / KEY_EXCHANGE signatures. */
+            if (index == SPDM_TPM_IAK_CERT_SLOT_ID) {
+                continue;
+            }
+#endif
             if ((*slot_mask & (1 << index)) != 0) {
                 m_other_slot_id = index;
             }

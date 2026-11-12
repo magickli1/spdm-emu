@@ -1,22 +1,40 @@
 #!/bin/sh -e
 
+# Enrollment credentials and TPM context files are local to the provisioning user.
+umask 077
+
 SWTPM_STATE_DIR="$(mktemp -d /tmp/swtpm-state.XXXXXXXXXX)"
 KEY_ALGORITHM=ecc
 HASH_ALGORITHM=256
+# Device serial number: X520SerialNumber in the IDevID/IAK certificate Subject
+# (TCG "TPM 2.0 Keys for Device Identity and Attestation" v1.10, sec. 8).
+DEVICE_SERIAL="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 
 ROOT_CTX=0x81000000
 ROOT_KEY=0x81000001
 REQU_CTX=0x81000010
 REQU_KEY=0x81000011
-RESP_CTX=0x81000020
-RESP_KEY=0x81000021
+
+# TCG DevID persistent key handles (sec. 7.3.1 Table 2).
+# The IDevID signs SPDM transcripts (slots 0/1/4).
+# The separate restricted IAK signs TPM2_Quote evidence (slot 5).
+IDEVID_KEY=0x81020000
+IAK_KEY=0x81020001
 
 ROOT_CERT=0x1500000
 REQU_CERT=0x1500010
-RESP_CERT=0x1500020
-
 REQU_CERT_CHAIN=0x1500011
-RESP_CERT_CHAIN=0x1500021
+
+# TCG DevID certificate chains (sec. 7.3.2 Table 4): DER, leaf at index 0,
+# without the Root CA certificate.
+IAK_CERT_CHAIN=0x01C90100
+IDEVID_CERT_CHAIN=0x01C90200
+
+# Obsolete provisioning layouts, removed by --cleanup.
+OLD_HANDLES="0x81000020 0x81000021 0x81000031"
+OLD_NV="0x1500020 0x1500021 0x1500030 0x1500031"
+
+DEVID_TOOL="$(dirname "$0")/tpm-devid.sh"
 
 mkdir -p "${SWTPM_STATE_DIR}"
 
@@ -37,13 +55,74 @@ while [ $# -gt 0 ] ; do
         --cleanup)
             CLEANUP=1
             ;;
+        --device-serial=*)
+            DEVICE_SERIAL=${1#*=}
+            ;;
     esac
     shift
 done
 
+# TCG DevID key templates (sec. 7.4.4): ECC NIST P256 (H-2) / P384 (H-3) or
+# RSA 2048 (H-1). ECC: TPM_ALG_ECDSA for IDevID and IAK (the hash of the
+# scheme follows nameAlg). RSA: IDevID scheme NULL, IAK RSAPSS-SHA256.
+case "${KEY_ALGORITHM}:${HASH_ALGORITHM}" in
+    rsa:256)
+        IDEVID_ALG="rsa2048:null:null"
+        IAK_ALG="rsa2048:rsapss-sha256:null"
+        UNIQUE_ALG=rsa
+        CERTIFY_SCHEME=rsapss
+        ;;
+    ecc:256|ecc:384)
+        IDEVID_ALG="ecc${HASH_ALGORITHM}:ecdsa-sha${HASH_ALGORITHM}:null"
+        IAK_ALG="ecc${HASH_ALGORITHM}:ecdsa-sha${HASH_ALGORITHM}:null"
+        UNIQUE_ALG=ecc
+        CERTIFY_SCHEME=ecdsa
+        ;;
+    *)
+        echo "Unsupported DevID template: use rsa/256 (H-1), ecc/256 (H-2), or ecc/384 (H-3)" >&2
+        exit 1
+        ;;
+esac
+# Template H-0 objectAttributes (noDA = 0, restricted only for the IAK)
+DEVID_ATTRS="fixedtpm|fixedparent|sensitivedataorigin|userwithauth|adminwithpolicy|sign"
+
+# TCG sec. 8.1 gives RSA EK certificates precedence over ECC certificates.
+# This sample creates the standard low-range RSA2048/P256 EK templates.
+# Reject other provisioned EK profiles rather than issue a mismatched identifier.
+select_endorsement_key() {
+    EK_ALGORITHM=${KEY_ALGORITHM}
+    EK_CERT_INDEX=""
+    EK_CERT=""
+    TPM_VENDOR=""
+    tpm2_getcap handles-nv-index > ek_nv_indices.txt
+    for ek_candidate in 0x01C00002 0x01C00012 0x01C0001C 0x01C0001E \
+                        0x01C0000A 0x01C00014 0x01C00016 0x01C00018 0x01C0001A ; do
+        for ek_nv_handle in $(awk '{print $2}' ek_nv_indices.txt); do
+            if [ "$((ek_nv_handle))" -eq "$((ek_candidate))" ]; then
+                EK_CERT_INDEX=${ek_candidate}
+                break 2
+            fi
+        done
+    done
+    case "${EK_CERT_INDEX}" in
+        "") return 0 ;;
+        0x01C00002) EK_ALGORITHM=rsa ;;
+        0x01C0000A) EK_ALGORITHM=ecc ;;
+        *)
+            echo "Unsupported EK certificate profile at ${EK_CERT_INDEX}; expected RSA2048/P256 low-range EK" >&2
+            exit 1
+            ;;
+    esac
+    EK_CERT=ek_cert.der
+    tpm2_nvread ${EK_CERT_INDEX} -C o -o "${EK_CERT}"
+    TPM_VENDOR=$(awk '/^TPM2_PT_MANUFACTURER:/ {found=1; next}
+        found && /value:/ {sub(/^[^\"]*\"/, ""); sub(/\".*/, ""); print; exit}' tpm_properties.txt)
+}
+
 cat > openssl.cnf << EOF
 [v3_ca]
 basicConstraints = critical,CA:true
+keyUsage = critical,keyCertSign,cRLSign
 
 [ v3_req ]
 basicConstraints = critical,CA:false
@@ -61,40 +140,44 @@ if [ -n "$START_SWTPM" ] ; then
     SWTPM_PID="$!"
     sleep 1
 
-    cleanup() {
-        if [ ! -z "$CLEANUP_DONE" ] ; then
-            exit 1
+    cleanup_failed_swtpm_setup() {
+        setup_status=$?
+        trap - EXIT INT TERM
+        # A successful setup leaves this swtpm available to the emulators.
+        if [ "$setup_status" -ne 0 ]; then
+            if kill -0 "$SWTPM_PID" 2>/dev/null; then
+                kill "$SWTPM_PID" 2>/dev/null || true
+                wait "$SWTPM_PID" 2>/dev/null || true
+            fi
+            rm -rf -- "$SWTPM_STATE_DIR"
         fi
-
-        CLEANUP_DONE=1
-        echo "Killing swtpm ${SWTPM_PID}..."
-        kill -9 ${SWTPM_PID}
-
-        echo "Cleaning up cache"
-        rm -rf "${SWTPM_STATE_DIR}"
-        exit 1
+        exit "$setup_status"
     }
+    trap cleanup_failed_swtpm_setup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
-    if [ -n "$CLEANUP_DONE" ] ; then
-        trap cleanup EXIT INT
-        exit 1
-    fi
+    # Never provision another TPM when our simulator failed to bind its ports.
+    kill -0 "$SWTPM_PID"
 
-    sleep 1
 fi
 
 echo "Checking tpm availability...."
-tpm2_getcap properties-fixed || {
+tpm2_getcap properties-fixed > tpm_properties.txt || {
     echo "tpm2_getcap failed"
     exit 1
 }
+cat tpm_properties.txt
+select_endorsement_key
 
 if [ -n "$CLEANUP" ] ; then
     echo "Cleaning up pesistent handles"
-    for i in $ROOT_CTX $ROOT_KEY $REQU_CTX $REQU_KEY $RESP_CTX $RESP_KEY ; do
+    # free object slots left by an interrupted run before EvictControl needs one
+    tpm2_flushcontext --transient-object || true
+    for i in $ROOT_CTX $ROOT_KEY $REQU_CTX $REQU_KEY $IDEVID_KEY $IAK_KEY $OLD_HANDLES ; do
         tpm2_evictcontrol -C o -c "$i" || true
     done
-    for i in $ROOT_CERT $REQU_CERT $RESP_CERT $REQU_CERT_CHAIN $RESP_CERT_CHAIN ; do
+    for i in $ROOT_CERT $REQU_CERT $REQU_CERT_CHAIN $IDEVID_CERT_CHAIN $IAK_CERT_CHAIN $OLD_NV ; do
         tpm2_nvundefine -C o "$i" || true
     done
     tpm2_flushcontext --transient-object
@@ -235,75 +318,113 @@ tpm2_flushcontext --transient-object 2>/dev/null || true
 tpm2_flushcontext --loaded-session 2>/dev/null || true
 
 #
-# Responder
+# Create separate IDevID and restricted IAK Primary keys in the Endorsement
+# Hierarchy, using the TCG DevID templates and unique fields. Only the IDevID
+# signs SPDM transcripts; the IAK signs Quotes.
 #
 
-echo "Creating responder ca context..."
-tpm2_createprimary -C e -g sha${HASH_ALGORITHM} -G ${KEY_ALGORITHM} -c responder.ctx
-tpm2_evictcontrol -C o -c responder.ctx ${RESP_CTX}
+echo "Computing DevID key policies (PolicyIDevIDKey)..."
+bash "${DEVID_TOOL}" policy --role idevid --hash sha${HASH_ALGORITHM} --out-dir .
+bash "${DEVID_TOOL}" policy --role iak --hash sha${HASH_ALGORITHM} --out-dir .
+bash "${DEVID_TOOL}" unique --role idevid --alg ${UNIQUE_ALG} --out idevid_unique.bin
+bash "${DEVID_TOOL}" unique --role iak --alg ${UNIQUE_ALG} --out iak_unique.bin
 
-tpm2_flushcontext --transient-object 2>/dev/null || true
-tpm2_flushcontext --loaded-session 2>/dev/null || true
-
-echo "Creating responder keys..."
-tpm2_create -C ${RESP_CTX} -G ${KEY_ALGORITHM} -u responder.pub -r responder.priv
-
-echo "Loading responder key..."
-tpm2_load -C ${RESP_CTX} -u responder.pub -r responder.priv -c responder_key.ctx
-
-echo "Persisting responder ca at 0x8010001..."
-tpm2_evictcontrol -C o -c responder_key.ctx ${RESP_KEY}
+echo "Creating EK (hwSerialNum source)..."
+tpm2_createek -c ek.ctx -G ${EK_ALGORITHM} -u ek.pub
+tpm2_readpublic -c ek.ctx -f der -o ek_pub.der
 tpm2_flushcontext --transient-object
 
-echo "Generating responder ca certificate request..."
-openssl req \
-    -provider tpm2 \
-    -provider default \
-    -new \
-    -subj "/CN=Responder Certificates" \
-    -config openssl.cnf \
-    -extensions v3_req \
-    -key "handle:${RESP_KEY}" \
-    -out responder_cert.csr
+echo "Creating IDevID primary key (${IDEVID_ALG}) in the Endorsement Hierarchy..."
+tpm2_createprimary -C e -g sha${HASH_ALGORITHM} -G ${IDEVID_ALG} \
+    -a "${DEVID_ATTRS}" -L idevid_policy_key.bin -u idevid_unique.bin \
+    -c idevid.ctx
+tpm2_evictcontrol -C o -c idevid.ctx ${IDEVID_KEY}
+tpm2_flushcontext --transient-object
 
-echo "Generatng responder ca certificate..."
-openssl x509 \
-    -provider tpm2 \
-    -provider default \
-    -req \
-    -in responder_cert.csr \
-    -CA root_ca_cert.pem \
-    -CAkey "handle:${ROOT_KEY}" \
-    -extfile openssl.cnf \
-    -extensions v3_req \
-    -days 356 \
-    -out responder_cert.pem
+echo "Creating IAK primary key (${IAK_ALG}) in the Endorsement Hierarchy..."
+tpm2_createprimary -C e -g sha${HASH_ALGORITHM} -G ${IAK_ALG} \
+    -a "${DEVID_ATTRS}|restricted" -L iak_policy_key.bin -u iak_unique.bin \
+    -c iak.ctx
+tpm2_evictcontrol -C o -c iak.ctx ${IAK_KEY}
+tpm2_flushcontext --transient-object
 
-echo "Converting pem certificate to der..."
-openssl x509 \
-    -outform DER \
-    -in responder_cert.pem \
-    -out responder_cert.der
+echo "Exporting IDevID and IAK public areas..."
+tpm2_readpublic -c ${IDEVID_KEY} -f pem -o idevid_pub.pem
+tpm2_readpublic -c ${IDEVID_KEY} -f tss -o idevid_public.tpm2b
+tpm2_readpublic -c ${IAK_KEY} -f pem -o iak_pub.pem
+tpm2_readpublic -c ${IAK_KEY} -f tss -o iak_public.tpm2b -n iak.name
 
-echo "Creating certificate chain..."
-cat root_ca_cert.der responder_cert.der > responder_certchain.der
+#
+# CA checks before issuing the certificates (the TCG-CSR-IDEVID protocol is not
+# emulated). adminWithPolicy = 1, so the ADMIN role of the DevID keys
+# (TPM2_Certify object, TPM2_ActivateCredential key) needs the matching
+# PolicyIDevIDKey branch: PolicySecret(EH) + PolicyCommandCode + PolicyOR.
+#
+echo "CA check 1/2: EK credential activation for the IAK..."
+# the EK is a Primary key derived from the EH seed: re-creating it gives the same key
+tpm2_createek -c ek.ctx -G ${EK_ALGORITHM} -u ek.pub
+head -c 16 /dev/urandom > ca_secret.bin
+tpm2_makecredential -T none -e ek.pub -s ca_secret.bin \
+    -n "$(xxd -p -c 256 iak.name)" -o ca_credential.bin
+tpm2_startauthsession --policy-session -S iak_admin.ctx -g sha${HASH_ALGORITHM}
+tpm2_policysecret -S iak_admin.ctx -c e
+tpm2_policycommandcode -S iak_admin.ctx TPM2_CC_ActivateCredential
+tpm2_policyor -S iak_admin.ctx -l sha${HASH_ALGORITHM}:iak_policy_user.bin,iak_policy_certify.bin,iak_policy_activate.bin,iak_policy_delegation.bin
+tpm2_startauthsession --policy-session -S ek_session.ctx
+tpm2_policysecret -S ek_session.ctx -c e
+tpm2_activatecredential -c ${IAK_KEY} -C ek.ctx -i ca_credential.bin \
+    -o ca_secret_recovered.bin -p "session:iak_admin.ctx" -P "session:ek_session.ctx" > /dev/null
+# policy sessions are closed by the TPM after use (continueSession clear)
+tpm2_flushcontext --transient-object
+cmp -s ca_secret.bin ca_secret_recovered.bin || {
+    echo "CA enrollment check FAILED: EK credential activation for the IAK"
+    exit 1
+}
 
-# echo "Converting pem certchain to der..."
-# openssl x509 \
-#     -outform DER \
-#     -in responder_certchain.pem \
-#     -out responder_certchain.der
+# tpm2-tools 5.x tpm2_certify takes no qualifyingData; freshness comes from the
+# fresh EK credential secret above.
+echo "CA check 2/2: TPM2_Certify of the IDevID by the IAK..."
+tpm2_startauthsession --policy-session -S idevid_admin.ctx -g sha${HASH_ALGORITHM}
+tpm2_policysecret -S idevid_admin.ctx -c e
+tpm2_policycommandcode -S idevid_admin.ctx TPM2_CC_Certify
+tpm2_policyor -S idevid_admin.ctx -l sha${HASH_ALGORITHM}:idevid_policy_user.bin,idevid_policy_certify.bin,idevid_policy_activate.bin,idevid_policy_delegation.bin
+tpm2_certify -c ${IDEVID_KEY} -C ${IAK_KEY} -P "session:idevid_admin.ctx" \
+    --scheme ${CERTIFY_SCHEME} -g sha${HASH_ALGORITHM} -o idevid_certify.attest -s idevid_certify.sig -f plain
+bash "${DEVID_TOOL}" enroll-check \
+    --iak-public iak_public.tpm2b --iak-pem iak_pub.pem \
+    --idevid-public idevid_public.tpm2b \
+    --attest idevid_certify.attest --signature idevid_certify.sig \
+    --hash sha${HASH_ALGORITHM}
 
-echo "Storing responder ca into TPM NVram"
-tpm2_nvdefine ${RESP_CERT} -C o -s $(stat -c %s responder_cert.der) -a "ownerread|ownerwrite|authread|authwrite"
-tpm2_nvwrite ${RESP_CERT} -C o -i responder_cert.der
+echo "Generating IDevID and IAK certificates (TCG sec. 8 fields)..."
+bash "${DEVID_TOOL}" cert --role idevid --pubkey idevid_pub.pem --ek-der ek_pub.der \
+    --ek-cert "${EK_CERT}" --tpm-vendor "${TPM_VENDOR}" \
+    --ca-cert root_ca_cert.pem --ca-key "handle:${ROOT_KEY}" \
+    --provider tpm2 --provider default --hash sha${HASH_ALGORITHM} \
+    --common-name "SPDM-EMU IDevID" --device-serial "${DEVICE_SERIAL}" \
+    --out idevid_cert.der
+bash "${DEVID_TOOL}" cert --role iak --pubkey iak_pub.pem --ek-der ek_pub.der \
+    --ek-cert "${EK_CERT}" --tpm-vendor "${TPM_VENDOR}" \
+    --ca-cert root_ca_cert.pem --ca-key "handle:${ROOT_KEY}" \
+    --provider tpm2 --provider default --hash sha${HASH_ALGORITHM} \
+    --common-name "SPDM-EMU IAK" --device-serial "${DEVICE_SERIAL}" --out iak_cert.der
+openssl x509 -inform DER -in idevid_cert.der -out idevid_cert.pem
+openssl x509 -inform DER -in iak_cert.der -out iak_cert.pem
+openssl verify -x509_strict -CAfile root_ca_cert.pem idevid_cert.pem iak_cert.pem
 
-echo "Storing responder ca chain into TPM NVram"
-tpm2_nvdefine ${RESP_CERT_CHAIN} -C o -s $(stat -c %s responder_certchain.der) -a "ownerread|ownerwrite|authread|authwrite"
-tpm2_nvwrite ${RESP_CERT_CHAIN} -C o -i responder_certchain.der
+# TCG DevID chains: DER, leaf first, without the Root CA certificate.
+echo "Storing IDevID certificate chain into TPM NV ${IDEVID_CERT_CHAIN}"
+tpm2_nvdefine ${IDEVID_CERT_CHAIN} -C o -s $(stat -c %s idevid_cert.der) -a "ownerread|ownerwrite|authread|no_da"
+tpm2_nvwrite ${IDEVID_CERT_CHAIN} -C o -i idevid_cert.der
+
+echo "Storing IAK certificate chain into TPM NV ${IAK_CERT_CHAIN}"
+tpm2_nvdefine ${IAK_CERT_CHAIN} -C o -s $(stat -c %s iak_cert.der) -a "ownerread|ownerwrite|authread|no_da"
+tpm2_nvwrite ${IAK_CERT_CHAIN} -C o -i iak_cert.der
 
 echo "Flushing transient objects..."
 tpm2_flushcontext --transient-object || true
+
+echo "Device serial (IDevID/IAK Subject serialNumber): ${DEVICE_SERIAL}"
 
 if [ -n "$START_SWTPM" ] ; then
     echo "Run following command before using SWTPM via tpm2-tools"
